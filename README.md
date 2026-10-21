@@ -157,6 +157,23 @@ the work in progress account until the finished goods are received — a
 material issue is never a debit to cost of goods sold. The rules are written
 down in `docs/order-and-manufacturing-policy.md`.
 
+**Payroll** — a salary structure is a reusable, effective-dated, versioned
+definition of the components of a pay packet, and each component says exactly
+which statutory wage bases it takes part in, so the provident fund wages, the
+state insurance wages and the taxable wages are each what the rule says they
+are. Attendance gives the payable days. The calculation is exact: every
+percentage is applied with integer arithmetic and every amount is an integer
+number of paise, and the result is a snapshot that is never recomputed, so a
+payslip issued last month still says what it said. Each statutory rule is an
+effective-dated version carrying its source and its status; a rule that is not
+in force **blocks the run** rather than applying itself, and a person has to
+acknowledge it, and the acknowledgement is recorded. Posted payroll writes one
+balanced journal — the cost of employment once, and the liabilities it
+creates — through the ordinary posting path, so the period locks apply and the
+trial balance is right. The evidence for every rule is in
+`docs/payroll-compliance-sources.md` and the treatment is in
+`docs/payroll-accounting-policy.md`.
+
 **Masters** — chart of accounts, customers and suppliers, items and services,
 tax categories, godowns, cost centres, currencies, price lists and payment
 terms, each with search, inline creation and dependency-aware deletion
@@ -313,8 +330,8 @@ fictional.
 ## Tests
 
 ```bash
-npm run test          # 171 tests
-cd src-tauri && cargo test   # 75 tests
+npm run test          # 205 tests
+cd src-tauri && cargo test   # 96 tests
 ```
 
 The TypeScript tests cover exact money arithmetic, exact quantity arithmetic,
@@ -361,11 +378,18 @@ persisted state and delivery history, and manufacturing produces a traceable
 finished good whose cost is reconciled to the inventory and the general
 ledger.
 
-**Workstream D — payroll.** Employee masters already exist; what is missing
-is the payroll run: the attendance and the earnings, the statutory
-contributions, the payslip and the journal that posts the month's cost. That
-is a milestone of its own, and it should not be started before the costing of
-manufacturing has been in use long enough to be trusted.
+**Workstream D — payroll.** The payroll run is here: the attendance and the
+earnings, the statutory contributions, the payslip and the journal that posts
+the month's cost. The calculation is exact and the rules are effective-dated,
+and a rule that is not in force blocks the run rather than applying itself.
+
+What payroll does **not** do is declared rather than implied: there is no
+declaration for the employee's tax claims, a revision that takes effect
+part-way through a period is applied to the whole period, and a part-period
+employee is paid for the whole period. Those, and the persistence defects
+still open, are written down in `docs/payroll-decisions.md` — what each one
+costs, what the alternatives are, and which of them is a decision rather
+than a defect.
 
 The limitations that stand between LedgerFy and a full manufacturing suite are
 listed in `docs/order-and-manufacturing-policy.md` §6 and are not hidden: no

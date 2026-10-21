@@ -640,6 +640,374 @@ export interface CostCentre {
   isActive: boolean
 }
 
+// ---------------------------------------------------------------------------
+// Payroll
+// ---------------------------------------------------------------------------
+
+/**
+ * The statutory bases a salary component can count towards.
+ *
+ * A component says exactly which bases it takes part in, rather than being
+ * marked taxable or not. The statutory wage bases differ: the Code on Social
+ * Security wages and the provident fund wages are not the same figure, and
+ * professional tax and salary tax have their own.
+ */
+export type WageBasis =
+  | 'gross-earnings'
+  | 'epf-wages'
+  | 'esic-wages'
+  | 'professional-tax-wages'
+  | 'salary-tds-wages'
+
+/** What a component does to the pay. */
+export type SalaryComponentKind =
+  | 'earning'
+  | 'employer-contribution'
+  | 'employee-deduction'
+  | 'reimbursement'
+
+/** How a component is computed. */
+export type SalaryCalculation =
+  | { type: 'fixed'; amount: Money }
+  | { type: 'percentage'; of: string; rateBps: number }
+  | { type: 'per-day'; rate: Money }
+
+/**
+ * One component of a salary structure.
+ *
+ * A component of a released structure never changes; a change means a new
+ * version of the structure.
+ */
+export interface SalaryComponent {
+  id: string
+  companyId: string
+  structureId: string
+  /** The component's code, unique within the structure. */
+  code: string
+  name: string
+  kind: SalaryComponentKind
+  calculation: SalaryCalculation
+  /** The statutory bases this component counts towards. */
+  bases: WageBasis[]
+  /** The order the component is calculated in. */
+  position: number
+}
+
+/**
+ * A salary structure, versioned and effective-dated.
+ *
+ * A version that has been used is never edited. A change is a new version,
+ * and the structure versions in force for a period are the ones a run uses.
+ */
+export interface SalaryStructure {
+  id: string
+  companyId: string
+  name: string
+  version: number
+  /** The date from which this version applies. */
+  effectiveFrom: string
+  /** The date after which it no longer applies. Null while it is the current one. */
+  effectiveTo: string | null
+  isActive: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+/** An employee's assignment to a salary structure, from a date. */
+export interface SalaryAssignment {
+  id: string
+  companyId: string
+  employeeId: string
+  structureId: string
+  effectiveFrom: string
+  effectiveTo: string | null
+  createdAt: string
+}
+
+/** What happened in a period for one employee. */
+export interface PayrollAttendance {
+  id: string
+  companyId: string
+  employeeId: string
+  /** The period, as `YYYY-MM`. */
+  period: string
+  /** The days the employee is paid for. */
+  payableDays: number
+  /** The days lost without pay. */
+  lopDays: number
+  /** Days paid at a different rate, such as overtime. */
+  extraDays: number
+  /** Other deductions recovered from the employee, in minor units. */
+  otherDeductions: Money
+  note: string
+  createdAt: string
+  updatedAt: string
+}
+
+// -- Statutory rules ---------------------------------------------------------
+
+/** How confidently a rule may be applied. */
+export type PayrollRuleStatus = 'in-force' | 'proposed' | 'out-of-scope'
+
+/** One band of a tax scale. */
+export interface TaxSlab {
+  /** The income at the bottom of the band. */
+  from: Money
+  /** The income at the top of the band. Null for the highest band. */
+  to: Money | null
+  /** The rate applied to the income above `from` within the band, in basis points. */
+  rateBps: number
+  /** The tax on the income exactly at `from`. */
+  baseAmount: Money
+}
+
+/** The parameters of the provident fund rule. */
+export interface EpfRuleParameters {
+  kind: 'epf'
+  employeeRateBps: number
+  employerRateBps: number
+  /** The employer's share that goes to the pension scheme. */
+  pensionRateBps: number
+  /** The wages the contribution is computed on, up to the ceiling. */
+  wageCeiling: Money
+  /** The ceiling that applied before a change part-way through a month. */
+  previousWageCeiling: Money | null
+  /** The day of the month the ceiling changed. Null when it has not changed. */
+  changeDayOfMonth: number | null
+  /** The reduced rate for a qualifying establishment, in basis points. */
+  reducedRateBps: number | null
+  /** Whether the employer's contribution is split between the two schemes. */
+  splitsToPension: boolean
+}
+
+/** The parameters of the state insurance rule. */
+export interface EsicRuleParameters {
+  kind: 'esic'
+  employeeRateBps: number
+  employerRateBps: number
+  wageCeiling: Money
+  /** The ceiling for a person with a disability. */
+  disabilityWageCeiling: Money
+  /** The daily wage below which the employee pays nothing. */
+  dailyWageExemption: Money
+  /** The number of days in a month the daily exemption is measured over. */
+  daysInMonth: number
+}
+
+/** The parameters of a professional tax schedule. */
+export interface ProfessionalTaxRuleParameters {
+  kind: 'professional-tax'
+  /** The state or territory the schedule belongs to. */
+  jurisdiction: string
+  /** The monthly slabs, each an upper bound and the monthly amount. */
+  slabs: Array<{ upTo: Money | null; monthly: Money }>
+}
+
+/** One regime's figures: the exemption, the deduction and the scale. */
+export interface TaxRegimeParameters {
+  /** The income below which nothing is taxed. */
+  basicExemption: Money
+  /** The deduction allowed against the income. */
+  standardDeduction: Money
+  slabs: TaxSlab[]
+  /** The income up to which the rebate removes the tax entirely. */
+  rebateUpTo: Money
+}
+
+/** The parameters of the salary tax rule for one tax year. */
+export interface SalaryTdsRuleParameters {
+  kind: 'salary-tds'
+  /** The tax year the rule belongs to, as `YYYY-YY`. */
+  taxYear: string
+  /** The section the deduction is made under. */
+  section: string
+  /** The default regime, which is the one a new employee is on. */
+  regime: 'new' | 'old'
+  /** The figures of the new regime. */
+  newRegime: TaxRegimeParameters
+  /** The figures of the old regime, for an employee who has chosen it. */
+  oldRegime: TaxRegimeParameters
+  /** The cess on the tax and the surcharge, in basis points. */
+  cessBps: number
+  /** The income above which a surcharge applies. */
+  surchargeThreshold: Money
+  surchargeRates: Array<{ above: Money; rateBps: number }>
+  /** The monthly amount used to spread the year's tax. */
+  monthsInYear: number
+}
+
+export type PayrollRuleParameters =
+  | EpfRuleParameters
+  | EsicRuleParameters
+  | ProfessionalTaxRuleParameters
+  | SalaryTdsRuleParameters
+
+export type PayrollRuleSet = 'epf' | 'esic' | 'professional-tax' | 'salary-tds'
+
+/**
+ * One version of a statutory rule, effective-dated.
+ *
+ * A rule carries its source and its status. A rule that is not `in-force`
+ * does not calculate silently: it blocks the run until a person with the
+ * authority to decide acknowledges it, and the acknowledgement is recorded.
+ */
+export interface StatutoryRuleVersion {
+  id: string
+  companyId: string
+  ruleSet: PayrollRuleSet
+  /** The date from which this version applies. */
+  effectiveFrom: string
+  /** The date after which it no longer applies. Null for the current one. */
+  effectiveTo: string | null
+  status: PayrollRuleStatus
+  /** Where the rule came from. Shown to the person who runs the payroll. */
+  source: string
+  /** A short statement of what the rule says. */
+  summary: string
+  parameters: PayrollRuleParameters
+  /** True when a person has acknowledged a rule that is not in force. */
+  acknowledged: boolean
+  acknowledgedBy: string | null
+  acknowledgedAt: string | null
+  createdAt: string
+}
+
+// -- The payroll accounts -----------------------------------------------------
+
+/**
+ * The company's payroll accounts.
+ *
+ * They are configured per company, in the same way the inventory accounts are,
+ * so that no ledger identifier is ever invented and a company that has not
+ * chosen them cannot post a payroll run.
+ */
+export interface PayrollAccounts {
+  id: string
+  companyId: string
+  /** The cost of employment: the earnings and the employer's contributions. */
+  salaryExpenseLedgerId: string
+  /** What is owed to the employees. */
+  netSalaryPayableLedgerId: string
+  /** The employees' own provident fund and state insurance. */
+  employeeDeductionsPayableLedgerId: string
+  /** Professional tax and salary tax deducted at source. */
+  statutoryDeductionsPayableLedgerId: string
+  /** The employer's provident fund and state insurance. */
+  employerContributionsPayableLedgerId: string
+  createdAt: string
+}
+
+// -- The payroll run ----------------------------------------------------------
+
+export type PayrollRunStatus =
+  | 'draft'
+  | 'calculated'
+  | 'approved'
+  | 'posted'
+  | 'paid'
+  | 'cancelled'
+  | 'reversed'
+
+/** The state of a payroll run, derived from its records. */
+export type PayrollRunState =
+  | 'draft'
+  | 'calculated'
+  | 'approved'
+  | 'posted'
+  | 'paid'
+  | 'cancelled'
+  | 'reversed'
+
+export interface PayrollRun {
+  id: string
+  companyId: string
+  /** The run number, e.g. `PR-2026-04`. */
+  number: string
+  /** The period, as `YYYY-MM`. */
+  period: string
+  periodStart: string
+  periodEnd: string
+  /** The date the salary is paid, which the tax rule is chosen by. */
+  paymentDate: string
+  status: PayrollRunStatus
+  /** The employees in the run. */
+  employeeCount: number
+  /** The totals, in minor units. */
+  grossEarnings: Money
+  employeeDeductions: Money
+  statutoryDeductions: Money
+  employerContributions: Money
+  netPay: Money
+  /** The journal voucher that carries the payroll, once it is posted. */
+  journalVoucherId: string | null
+  createdAt: string
+  updatedAt: string
+  revision: number
+}
+
+/**
+ * One employee's pay, as it was calculated.
+ *
+ * The snapshot is never recomputed. The payslip is rendered from it, so a
+ * payslip issued last month still says what it said.
+ */
+export interface PayrollSnapshot {
+  id: string
+  companyId: string
+  runId: string
+  employeeId: string
+  /** The figures, exactly as they were calculated. */
+  snapshot: PayrollCalculation
+  createdAt: string
+}
+
+/** The figures of one employee's pay for one period. */
+export interface PayrollCalculation {
+  employeeId: string
+  employeeName: string
+  employeeCode: string
+  period: string
+  /** The structure and the rule versions that were used. */
+  structureId: string
+  structureVersion: number
+  ruleVersions: Array<{ ruleSet: PayrollRuleSet; versionId: string; source: string }>
+  /** Each component, computed. */
+  components: Array<{
+    code: string
+    name: string
+    kind: SalaryComponentKind
+    amount: Money
+    /** The exact amount before it was rounded to the rupee. */
+    exactAmount: Money
+  }>
+  grossEarnings: Money
+  exactGrossEarnings: Money
+  employeeDeductions: Array<{ code: string; name: string; amount: Money }>
+  employeeDeductionTotal: Money
+  statutoryDeductions: Array<{ code: string; name: string; amount: Money }>
+  statutoryDeductionTotal: Money
+  employerContributions: Array<{ code: string; name: string; amount: Money }>
+  employerContributionTotal: Money
+  netPay: Money
+  /** The liability this employee creates. */
+  liability: Money
+}
+
+/** A payment of salary, settled by a payment voucher. */
+export interface PayrollPayment {
+  id: string
+  companyId: string
+  runId: string
+  employeeId: string
+  /** The amount paid. */
+  amount: Money
+  /** The payment voucher that settled it. */
+  paymentVoucherId: string | null
+  /** The date it was paid. */
+  paidOn: string
+  createdAt: string
+}
+
 export interface Employee {
   id: string
   companyId: string
@@ -650,6 +1018,37 @@ export interface Employee {
   dateOfJoining: string
   monthlyGross: Money
   isActive: boolean
+  /** The cost centre the employee belongs to. */
+  costCentreId: string | null
+  /**
+   * The employee's tax number.
+   *
+   * It is needed to remit the tax deducted at source. It is never shown in
+   * full, never written to a log, and never exported.
+   */
+  pan: string | null
+  /** The tax regime the employee has chosen, which decides the slabs. */
+  taxRegime: 'new' | 'old' | null
+  /** Whether the employee contributes to the provident fund. */
+  isProvidentFundMember: boolean
+  /** Whether the employee is covered by the state insurance scheme. */
+  isStateInsuranceMember: boolean
+  /**
+   * Whether the employee is a person with a disability.
+   *
+   * The state insurance wage ceiling is higher for such an employee. The
+   * fact is held because the employer needs it to compute the contribution
+   * correctly, and it is never shown.
+   */
+  isPersonWithDisability: boolean
+  /** The state or territory whose professional tax applies to the employee. */
+  professionalTaxJurisdiction: string | null
+  /** The bank the salary is paid to. */
+  bankName: string | null
+  /** The account the salary is paid to. Never shown in full. */
+  bankAccountNumber: string | null
+  /** The branch identifier of the account. Never shown in full. */
+  bankIfsc: string | null
 }
 
 export interface Currency {

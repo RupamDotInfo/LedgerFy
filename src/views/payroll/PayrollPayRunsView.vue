@@ -1,9 +1,13 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 import BaseBadge from '@/components/ui/BaseBadge.vue'
+import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseCard from '@/components/ui/BaseCard.vue'
 import BaseEmptyState from '@/components/ui/BaseEmptyState.vue'
+import BaseInput from '@/components/ui/BaseInput.vue'
+import BaseModal from '@/components/ui/BaseModal.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
 import BaseSkeleton from '@/components/ui/BaseSkeleton.vue'
 import DataTable from '@/components/ui/DataTable.vue'
@@ -11,11 +15,26 @@ import FilterBar from '@/components/ui/FilterBar.vue'
 import MaterialIcon from '@/components/ui/MaterialIcon.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StatTile from '@/components/ui/StatTile.vue'
+import type { PayrollPayment, PayrollRun, PayrollRunState } from '@/domain/types'
+import { formatDate } from '@/lib/datetime'
+import { formatMoney } from '@/lib/money'
 import { useSessionStore } from '@/stores/session'
-import { formatMoney, type Money } from '@/lib/money'
-import { formatPeriod } from '@/lib/datetime'
+import { useToastStore } from '@/stores/toast'
+import { calculateRun } from '@/views/payroll/payrollActions'
+import PayrollPostDialog from '@/views/payroll/PayrollPostDialog.vue'
+import { usePostRun } from '@/views/payroll/usePostRun'
+import {
+  periodBounds,
+  periodOptions,
+  runState,
+  runStateTone,
+  RUN_STATE_LABEL,
+} from '@/views/payroll/payrollSupport'
 
 const session = useSessionStore()
+const toast = useToastStore()
+const router = useRouter()
+const postRun = usePostRun()
 
 /* ------------------------------------------------------------------ *
  * Types
@@ -30,161 +49,361 @@ type TableColumnSpec = {
   width?: string
 }
 
-type TaxPeriod = {
-  value: string
-  label: string
-  from: string
-  to: string
-}
-
-type ParticipantRow = {
+type RunRow = {
   id: string
-  code: string
-  name: string
-  department: string
-  dateOfJoining: string
-  monthlyGross: Money
+  number: string
+  period: string
+  periodLabel: string
+  paymentDate: string
+  employeeCount: number
+  grossEarnings: number
+  netPay: number
+  state: PayrollRunState
+  run: PayrollRun
 }
 
 const columns: TableColumnSpec[] = [
-  { key: 'code', label: 'Code', sortable: true },
-  { key: 'name', label: 'Employee', sortable: true },
-  { key: 'department', label: 'Department' },
-  { key: 'dateOfJoining', label: 'Date of joining', sortable: true },
-  { key: 'monthlyGross', label: 'Monthly gross', align: 'right', numeric: true, sortable: true },
+  { key: 'number', label: 'Run', sortable: true },
+  { key: 'periodLabel', label: 'Period', sortable: true },
+  { key: 'paymentDate', label: 'Payment date', sortable: true },
+  { key: 'employeeCount', label: 'Employees', align: 'right', numeric: true },
+  { key: 'grossEarnings', label: 'Gross', align: 'right', numeric: true },
+  { key: 'netPay', label: 'Net payable', align: 'right', numeric: true },
+  { key: 'state', label: 'State' },
+  { key: 'actions', label: '', width: '210px' },
 ]
 
-const EmptyIcon = () => h(MaterialIcon, { name: 'payments', size: 19 })
+const EmptyIcon = () => h(MaterialIcon, { name: 'receipt_long', size: 19 })
 
 /* ------------------------------------------------------------------ *
  * State
  * ------------------------------------------------------------------ */
 
-const selectedPeriod = ref('')
+const loading = ref(true)
+const busy = ref(false)
+const runs = ref<PayrollRun[]>([])
+const snapshotsOf = ref<Map<string, number>>(new Map())
+const paymentsOf = ref<Map<string, PayrollPayment[]>>(new Map())
 
-const company = computed(() => session.activeCompany)
-const currency = computed(() => company.value?.baseCurrency ?? 'INR')
+const search = ref('')
+const periodFilter = ref('all')
+const stateFilter = ref('all')
+
+const newRunOpen = ref(false)
+const newRunPeriod = ref('')
+const newRunPaymentDate = ref('')
+const newRunError = ref('')
+const postOpen = ref(false)
+/** The run the confirmation is open for. */
+const postingRow = ref<RunRow | null>(null)
+
+const currency = computed(() => session.activeCompany?.baseCurrency ?? 'INR')
+const companyId = computed(() => session.activeCompanyId)
+
+const stateOptions = [
+  { value: 'all', label: 'All states' },
+  ...(['draft', 'calculated', 'approved', 'posted', 'paid', 'cancelled'] as PayrollRunState[]).map(
+    (state) => ({ value: state, label: RUN_STATE_LABEL[state] }),
+  ),
+]
+
+/** The periods a run may be raised for: the open financial year. */
+const availablePeriods = computed(() => {
+  const year = session.activeFinancialYear
+  const periods: string[] = []
+  if (year) {
+    const [startYear, startMonth] = year.start.split('-').map(Number)
+    for (let index = 0; index < 12; index += 1) {
+      const month = startMonth + index
+      const yearNumber = startYear + Math.floor((month - 1) / 12)
+      const monthNumber = ((month - 1) % 12) + 1
+      periods.push(`${yearNumber}-${String(monthNumber).padStart(2, '0')}`)
+    }
+  }
+  for (const run of runs.value) {
+    if (!periods.includes(run.period)) periods.push(run.period)
+  }
+  return periods.sort().reverse()
+})
+
+const periodFilterOptions = computed(() => [
+  { value: 'all', label: 'All periods' },
+  ...periodOptions(availablePeriods.value),
+])
+
+const rows = computed<RunRow[]>(() => {
+  const term = search.value.trim().toLowerCase()
+  return runs.value
+    .map((run) => {
+      const state = runState(
+        run,
+        (snapshotsOf.value.get(run.id) ?? 0) > 0,
+        paymentsOf.value.get(run.id) ?? [],
+      )
+      const bounds = periodBounds(run.period)
+      return {
+        id: run.id,
+        number: run.number,
+        period: run.period,
+        periodLabel: bounds.start,
+        paymentDate: run.paymentDate,
+        employeeCount: run.employeeCount,
+        grossEarnings: run.grossEarnings,
+        netPay: run.netPay,
+        state,
+        run,
+      }
+    })
+    .filter((row) => {
+      if (periodFilter.value !== 'all' && row.period !== periodFilter.value) return false
+      if (stateFilter.value !== 'all' && row.state !== stateFilter.value) return false
+      if (!term) return true
+      return `${row.number} ${row.period}`.toLowerCase().includes(term)
+    })
+})
+
+const filtered = computed(() => rows.value)
+
+const grossShown = computed(() =>
+  filtered.value.reduce((sum, row) => sum + row.grossEarnings, 0),
+)
+const netShown = computed(() => filtered.value.reduce((sum, row) => sum + row.netPay, 0))
+const employeesShown = computed(() =>
+  filtered.value.reduce((sum, row) => sum + row.employeeCount, 0),
+)
 
 /* ------------------------------------------------------------------ *
- * Helpers
+ * Loading
  * ------------------------------------------------------------------ */
 
-function monthPeriods(from: string, to: string): TaxPeriod[] {
-  if (!from || !to) return []
-  const periods: TaxPeriod[] = []
-  const start = new Date(`${from}T00:00:00`)
-  const end = new Date(`${to}T00:00:00`)
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return []
-  const cursor = new Date(start.getFullYear(), start.getMonth(), 1)
-  while (
-    cursor.getFullYear() < end.getFullYear() ||
-    (cursor.getFullYear() === end.getFullYear() && cursor.getMonth() <= end.getMonth())
-  ) {
-    const year = cursor.getFullYear()
-    const month = cursor.getMonth()
-    const monthStart = `${year}-${String(month + 1).padStart(2, '0')}-01`
-    const lastDay = new Date(year, month + 1, 0).getDate()
-    const monthEnd = `${year}-${String(month + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`
-    periods.push({
-      value: `${year}-${String(month + 1).padStart(2, '0')}`,
-      label: formatPeriod(monthStart),
-      from: monthStart < from ? from : monthStart,
-      to: monthEnd > to ? to : monthEnd,
-    })
-    cursor.setMonth(cursor.getMonth() + 1)
+async function load() {
+  const id = companyId.value
+  if (!id) {
+    runs.value = []
+    loading.value = false
+    return
   }
-  return periods
+  loading.value = true
+  try {
+    const list = await session.repository.listPayrollRuns(id)
+    runs.value = list
+
+    // The state of a run is derived from what has happened to it, so the
+    // snapshot and the payments are read with it.
+    const details = await Promise.all(
+      list.map((run) => session.repository.getPayrollRun(id, run.id)),
+    )
+    const snapshotCounts = new Map<string, number>()
+    for (const detail of details) {
+      if (detail) snapshotCounts.set(detail.run.id, detail.snapshots.length)
+    }
+    snapshotsOf.value = snapshotCounts
+
+    const payments = new Map<string, PayrollPayment[]>()
+    await Promise.all(
+      list
+        .filter((run) => run.journalVoucherId !== null)
+        .map(async (run) => {
+          payments.set(run.id, await session.repository.listPayrollPayments(id, run.id))
+        }),
+    )
+    paymentsOf.value = payments
+  } catch (cause) {
+    toast.error(
+      'The payroll runs could not be read',
+      cause instanceof Error ? cause.message : 'The repository did not say why.',
+    )
+  } finally {
+    loading.value = false
+  }
 }
 
-const periods = computed(() => monthPeriods(session.activePeriod.from, session.activePeriod.to))
-
-const periodOptions = computed(() =>
-  periods.value.map((period) => ({ value: period.value, label: period.label })),
-)
-
-const activePeriod = computed(
-  () => periods.value.find((period) => period.value === selectedPeriod.value) ?? null,
-)
-
 /* ------------------------------------------------------------------ *
- * Derived figures
+ * The actions
  * ------------------------------------------------------------------ */
 
-const activeEmployees = computed(() => session.employees.filter((employee) => employee.isActive))
+function openNewRun() {
+  const periods = availablePeriods.value
+  newRunPeriod.value = periods[0] ?? ''
+  newRunPaymentDate.value = newRunPeriod.value ? `${newRunPeriod.value}-28` : ''
+  newRunError.value = ''
+  newRunOpen.value = true
+}
 
-/** Monthly gross exposure taken straight from the employee master. */
-const monthlyGrossExposure = computed(() =>
-  activeEmployees.value.reduce((sum, employee) => sum + employee.monthlyGross, 0),
-)
+async function createRun() {
+  const id = companyId.value
+  if (!id) {
+    newRunError.value = 'Open a company before raising a payroll run.'
+    return
+  }
+  if (!newRunPeriod.value) {
+    newRunError.value = 'Choose the period the run pays.'
+    return
+  }
+  if (!newRunPaymentDate.value) {
+    newRunError.value = 'Choose the date the salary is paid on.'
+    return
+  }
 
-/**
- * The employees a run for the selected period would cover: active on the
- * master, and already joined on or before the period end.
- */
-const participants = computed<ParticipantRow[]>(() =>
-  activeEmployees.value
-    .filter((employee) => {
-      const period = activePeriod.value
-      if (!period) return true
-      return !employee.dateOfJoining || employee.dateOfJoining <= period.to
-    })
-    .map((employee) => ({
-      id: employee.id,
-      code: employee.code,
-      name: employee.name,
-      department: employee.department || 'Not recorded',
-      dateOfJoining: employee.dateOfJoining,
-      monthlyGross: employee.monthlyGross,
-    }))
-    .sort((left, right) => left.code.localeCompare(right.code)),
-)
+  busy.value = true
+  try {
+    const number = await session.repository.nextPayrollNumber(id, newRunPeriod.value)
+    const bounds = periodBounds(newRunPeriod.value)
+    const now = new Date().toISOString()
+    const run: PayrollRun = {
+      id: `run-${Date.now().toString(36)}`,
+      companyId: id,
+      number,
+      period: newRunPeriod.value,
+      periodStart: bounds.start,
+      periodEnd: bounds.end,
+      paymentDate: newRunPaymentDate.value,
+      status: 'draft',
+      employeeCount: 0,
+      grossEarnings: 0,
+      employeeDeductions: 0,
+      statutoryDeductions: 0,
+      employerContributions: 0,
+      netPay: 0,
+      journalVoucherId: null,
+      createdAt: now,
+      updatedAt: now,
+      revision: 1,
+    }
+    await session.repository.savePayrollRun(run)
+    newRunOpen.value = false
+    toast.success('Payroll run raised', `${number} is a draft for ${bounds.start}.`)
+    await load()
+    await router.push(`/payroll/pay-runs/${run.id}`)
+  } catch (cause) {
+    newRunError.value =
+      cause instanceof Error ? cause.message : 'The run was not saved and the repository did not say why.'
+  } finally {
+    busy.value = false
+  }
+}
 
-const participantsGross = computed(() =>
-  participants.value.reduce((sum, row) => sum + row.monthlyGross, 0),
-)
+async function calculate(row: RunRow) {
+  const id = companyId.value
+  if (!id) return
+  busy.value = true
+  try {
+    const employees = await session.repository.listEmployees(id)
+    const year = session.activeFinancialYear
+    const calculation = await calculateRun(
+      session.repository,
+      id,
+      row.run,
+      employees,
+      year?.start ?? `${row.period.slice(0, 4)}-04-01`,
+      year?.end ?? `${Number(row.period.slice(0, 4)) + 1}-03-31`,
+    )
+    if (calculation.blocked.length) {
+      toast.error(
+        'The run is blocked by a rule that is not in force',
+        calculation.blocked.map((entry) => entry.reason).join(' '),
+      )
+      return
+    }
+    await session.repository.savePayrollRun(calculation.run, calculation.snapshots)
+    toast.success(
+      'Payroll calculated',
+      `${row.number} carries ${calculation.run.employeeCount} employees and ${formatMoney(calculation.run.netPay, currency.value)} of net pay.`,
+    )
+    await load()
+  } catch (cause) {
+    toast.error(
+      'The run was not calculated',
+      cause instanceof Error ? cause.message : 'The repository did not say why.',
+    )
+  } finally {
+    busy.value = false
+  }
+}
 
-/* ------------------------------------------------------------------ *
- * Readiness
- * ------------------------------------------------------------------ */
+async function approve(row: RunRow) {
+  const id = companyId.value
+  if (!id) return
+  busy.value = true
+  try {
+    // A posted run keeps the journal that carried it; a run that is not
+    // posted has none.
+    await session.repository.savePayrollRun({ ...row.run, status: 'approved' })
+    toast.success('Payroll approved', `${row.number} is approved and may now be posted.`)
+    await load()
+  } catch (cause) {
+    toast.error(
+      'The run was not approved',
+      cause instanceof Error ? cause.message : 'The repository did not say why.',
+    )
+  } finally {
+    busy.value = false
+  }
+}
 
-const readiness = [
-  {
-    title: 'Attendance and leave input',
-    detail:
-      'A run needs the days actually worked, leave taken and overtime for each employee. No attendance register exists in this build.',
-    state: 'Not implemented',
-  },
-  {
-    title: 'An earnings and deductions structure',
-    detail:
-      'Basic pay, allowances, overtime and bonus on one side; provident fund, professional tax, TDS on salary and loan recovery on the other. Only a single monthly gross figure is held per employee.',
-    state: 'Not implemented',
-  },
-  {
-    title: 'Payroll accounting entries',
-    detail:
-      'A run would post a salary debit, credits to the statutory payable accounts and a net amount payable to each employee. There is no payroll voucher type, so no payroll voucher can be generated in this build.',
-    state: 'Not implemented',
-  },
-  {
-    title: 'Statutory contributions and their rates',
-    detail:
-      'Provident fund, ESI, professional tax and TDS on salary need wage ceilings and slab rates. No statutory rate is assumed anywhere in this build.',
-    state: 'Not implemented',
-  },
-  {
-    title: 'A locked run record and payslips',
-    detail:
-      'A processed run would be locked against later edits and would produce the payslips on the payslip screen. No run can be processed, so no payslip can exist.',
-    state: 'Not implemented',
-  },
-  {
-    title: 'Payment of net salary',
-    detail:
-      'The net amount would be paid out through an ordinary payment voucher once a run exists. A payment voucher can be raised by hand today, but it is not driven by a run.',
-    state: 'Available by hand',
-  },
-]
+async function post(row: RunRow) {
+  const id = companyId.value
+  if (!id) return
+  busy.value = true
+  try {
+    const detail = await session.repository.getPayrollRun(id, row.id)
+    if (!detail) {
+      toast.error('The run was not posted', 'The run could not be read from the repository.')
+      return
+    }
+    const prepared = await postRun.prepare(detail.run, detail.snapshots)
+    if (!prepared) {
+      toast.error('The run was not posted', postRun.reason.value)
+      return
+    }
+    postingRow.value = row
+    postOpen.value = true
+  } catch (cause) {
+    toast.error(
+      'The run was not posted',
+      cause instanceof Error ? cause.message : 'The repository did not say why.',
+    )
+  } finally {
+    busy.value = false
+  }
+}
+
+async function confirmPost(row: RunRow) {
+  busy.value = true
+  try {
+    const posted = await postRun.post(row.run)
+    if (!posted) {
+      toast.error('The run was not posted', postRun.reason.value)
+      return
+    }
+    postOpen.value = false
+    await load()
+  } finally {
+    busy.value = false
+  }
+}
+
+async function cancel(row: RunRow) {
+  const id = companyId.value
+  if (!id) return
+  busy.value = true
+  try {
+    await session.repository.savePayrollRun({ ...row.run, status: 'cancelled' })
+    toast.success('Payroll cancelled', `${row.number} has been cancelled.`)
+    await load()
+  } catch (cause) {
+    toast.error(
+      'The run was not cancelled',
+      cause instanceof Error ? cause.message : 'The repository did not say why.',
+    )
+  } finally {
+    busy.value = false
+  }
+}
+
+function openDetail(row: RunRow) {
+  void router.push(`/payroll/pay-runs/${row.id}`)
+}
 
 /* ------------------------------------------------------------------ *
  * Lifecycle
@@ -192,179 +411,244 @@ const readiness = [
 
 onMounted(async () => {
   if (!session.ready && !session.loading) await session.bootstrap()
+  await load()
 })
 
 watch(
-  periods,
-  (list) => {
-    if (!list.length) {
-      selectedPeriod.value = ''
-      return
-    }
-    if (!list.some((period) => period.value === selectedPeriod.value)) {
-      selectedPeriod.value = list[list.length - 1]!.value
-    }
+  () => session.activeCompanyId,
+  () => {
+    void load()
   },
-  { immediate: true },
 )
 </script>
 
 <template>
   <div class="flex h-full flex-col overflow-hidden">
     <PageHeader
-      title="Pay runs"
-      subtitle="A pay run has not been processed in this build"
+      title="Payroll runs"
+      subtitle="Every run of salary this company has raised"
       icon="payments"
       :breadcrumb="[{ label: 'Payroll' }, { label: 'Pay runs' }]"
     >
-      <template #title-meta>
-        <BaseBadge tone="neutral" size="xs" icon="block">Not implemented</BaseBadge>
+      <template #actions>
+        <BaseButton size="sm" variant="primary" icon="add" @click="openNewRun">New run</BaseButton>
       </template>
     </PageHeader>
 
     <FilterBar>
+      <BaseInput
+        v-model="search"
+        type="search"
+        placeholder="Search by run number or period"
+        size="sm"
+        class="w-64"
+        label="Search"
+      />
       <BaseSelect
-        v-model="selectedPeriod"
-        label="Pay period"
+        v-model="periodFilter"
+        label="Period"
         size="sm"
         class="w-48"
-        :options="periodOptions"
-        :disabled="!periodOptions.length"
+        :options="periodFilterOptions"
+      />
+      <BaseSelect
+        v-model="stateFilter"
+        label="State"
+        size="sm"
+        class="w-44"
+        :options="stateOptions"
       />
       <template #trailing>
-        <span class="text-label-sm text-outline">
-          {{ activePeriod ? `${activePeriod.from} to ${activePeriod.to}` : 'No period' }}
-        </span>
+        <span class="text-label-sm text-outline">{{ filtered.length }} runs</span>
       </template>
     </FilterBar>
 
     <div class="min-h-0 flex-1 overflow-auto p-space-lg">
-      <div v-if="session.loading && !session.ready" class="space-y-space-md">
+      <div v-if="loading" class="space-y-space-md">
         <div class="grid grid-cols-1 gap-space-md sm:grid-cols-2 lg:grid-cols-4">
           <BaseSkeleton v-for="index in 4" :key="index" class="h-24" />
         </div>
-        <BaseSkeleton class="h-64" />
+        <BaseSkeleton class="h-72" />
       </div>
 
       <template v-else>
-        <div class="rounded-sm border-l-4 border-l-tertiary bg-surface-container-low p-space-md">
-          <div class="flex items-start gap-space-sm">
-            <MaterialIcon name="info" :size="18" class="mt-0.5 shrink-0 text-tertiary" />
-            <div class="min-w-0">
-              <p class="text-label-md font-bold text-on-surface">
-                Pay runs are not implemented yet, and no payroll voucher can be generated in this
-                build.
-              </p>
-              <p class="mt-0.5 text-body-sm text-on-surface-variant">
-                There is no pay-run record in the repository, no payroll voucher type, and no
-                button on this screen that posts salary to the books. The workspace below is
-                deliberately empty: it shows what a run would cover and what it would still need,
-                and nothing else.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <div class="mt-space-md grid grid-cols-1 gap-space-md sm:grid-cols-2 lg:grid-cols-4">
+        <div class="grid grid-cols-1 gap-space-md sm:grid-cols-2 lg:grid-cols-4">
           <StatTile
-            label="Monthly gross exposure (from the employee master)"
-            :value="formatMoney(monthlyGrossExposure, currency)"
-            icon="payments"
-            tone="info"
-            :hint="`${activeEmployees.length} active employees`"
-          />
-          <StatTile
-            label="Pay runs processed"
-            value="0"
-            icon="history"
-            tone="warning"
-            hint="No run has been processed in this build"
-          />
-          <StatTile
-            label="Employees in this period"
-            :value="String(participants.length)"
-            icon="groups"
-            :hint="`Joined on or before ${activePeriod?.to ?? 'the period end'}`"
-          />
-          <StatTile
-            label="Gross for this period"
-            :value="formatMoney(participantsGross, currency)"
+            label="Runs"
+            :value="String(filtered.length)"
             icon="receipt_long"
-            hint="Sum of the monthly gross of those employees"
+            hint="The runs that match the filters"
+          />
+          <StatTile
+            label="Employees paid"
+            :value="String(employeesShown)"
+            icon="groups"
+            hint="Across the runs that match the filters"
+          />
+          <StatTile
+            label="Gross"
+            :value="formatMoney(grossShown, currency)"
+            icon="trending_up"
+            hint="The gross of the runs that match the filters"
+          />
+          <StatTile
+            label="Net payable"
+            :value="formatMoney(netShown, currency)"
+            icon="account_balance_wallet"
+            hint="The net of the runs that match the filters"
           />
         </div>
 
         <BaseCard
           class="mt-space-md"
-          title="Pay runs"
-          description="Processed runs appear here once a run can be processed"
-        >
-          <BaseEmptyState
-            :icon="EmptyIcon"
-            title="No pay run has been processed"
-            description="Pay runs cannot be created in this build, so there is no run, no processed amount and no net pay to show. The figures above come from the employee master only."
-          />
-        </BaseCard>
-
-        <BaseCard
-          class="mt-space-md"
-          title="Who would be in this run"
-          description="Active employees who had joined on or before the end of the selected period"
+          title="Payroll register"
+          description="A run is calculated from a draft, approved from a calculated run and posted from an approved run"
+          padded
         >
           <DataTable
             :columns="columns"
-            :rows="participants"
+            :rows="filtered"
             row-key="id"
-            :clickable="false"
-            empty-title="No employee in this period"
-            empty-description="No active employee had joined on or before the end of the selected period."
+            empty-title="No payroll run yet"
+            empty-description="Raise a run for a period to begin paying salary."
           >
-            <template #cell:code="{ row }">
-              <span class="num font-semibold text-on-surface">{{ row.code }}</span>
+            <template #cell:number="{ row }">
+              <button
+                type="button"
+                class="num font-semibold text-primary hover:underline"
+                @click.stop="openDetail(row)"
+              >
+                {{ row.number }}
+              </button>
             </template>
-            <template #cell:dateOfJoining="{ row }">
-              <span class="num text-on-surface-variant">{{ row.dateOfJoining }}</span>
+            <template #cell:periodLabel="{ row }">
+              <span class="num text-on-surface-variant">{{ row.periodLabel }}</span>
             </template>
-            <template #cell:monthlyGross="{ row }">
-              <span class="num text-on-surface">{{ formatMoney(row.monthlyGross, currency) }}</span>
+            <template #cell:paymentDate="{ row }">
+              <span class="num text-on-surface-variant">{{ formatDate(row.paymentDate) }}</span>
+            </template>
+            <template #cell:employeeCount="{ row }">
+              <span class="num text-on-surface">{{ row.employeeCount }}</span>
+            </template>
+            <template #cell:grossEarnings="{ row }">
+              <span class="num text-on-surface">{{ formatMoney(row.grossEarnings, currency) }}</span>
+            </template>
+            <template #cell:netPay="{ row }">
+              <span class="num font-semibold text-on-surface">{{ formatMoney(row.netPay, currency) }}</span>
+            </template>
+            <template #cell:state="{ row }">
+              <BaseBadge :tone="runStateTone(row.state)" size="xs">
+                {{ RUN_STATE_LABEL[row.state] }}
+              </BaseBadge>
+            </template>
+            <template #cell:actions="{ row }">
+              <div class="flex items-center justify-end gap-1" @click.stop>
+                <BaseButton
+                  v-if="row.state === 'draft'"
+                  size="xs"
+                  variant="tonal"
+                  icon="calculate"
+                  :disabled="busy"
+                  @click="calculate(row)"
+                >
+                  Calculate
+                </BaseButton>
+                <BaseButton
+                  v-if="row.state === 'calculated'"
+                  size="xs"
+                  variant="tonal"
+                  icon="task_alt"
+                  :disabled="busy"
+                  @click="approve(row)"
+                >
+                  Approve
+                </BaseButton>
+                <BaseButton
+                  v-if="row.state === 'approved'"
+                  size="xs"
+                  variant="primary"
+                  icon="send"
+                  :disabled="busy"
+                  @click="post(row)"
+                >
+                  Post
+                </BaseButton>
+                <BaseButton
+                  v-if="['draft', 'calculated', 'approved'].includes(row.state)"
+                  size="xs"
+                  variant="text"
+                  icon="block"
+                  :disabled="busy"
+                  @click="cancel(row)"
+                >
+                  Cancel
+                </BaseButton>
+                <BaseButton
+                  size="xs"
+                  variant="text"
+                  icon="chevron_right"
+                  @click="openDetail(row)"
+                >
+                  Open
+                </BaseButton>
+              </div>
             </template>
           </DataTable>
-
-          <p class="mt-space-sm text-label-xs text-outline">
-            This is the population a run would cover, taken from the employee master. It is not a
-            run, it produces no voucher, and the monthly gross shown is the master figure before
-            any attendance, earnings or deduction is applied.
-          </p>
         </BaseCard>
 
-        <BaseCard
+        <BaseEmptyState
+          v-if="!filtered.length && !runs.length"
           class="mt-space-md"
-          title="Readiness checklist"
-          description="What a pay run would still need before it could be processed"
+          :icon="EmptyIcon"
+          title="No payroll run yet"
+          description="Raise a run for the period you are paying, then calculate it from the salary structures and the attendance."
         >
-          <ul class="space-y-space-sm">
-            <li
-              v-for="item in readiness"
-              :key="item.title"
-              class="flex items-start gap-space-sm rounded-sm bg-surface-container-low p-space-sm"
-            >
-              <MaterialIcon
-                :name="item.state === 'Available by hand' ? 'check_circle' : 'radio_button_unchecked'"
-                :size="18"
-                class="mt-0.5 shrink-0"
-                :class="item.state === 'Available by hand' ? 'text-secondary' : 'text-outline'"
-              />
-              <div class="min-w-0">
-                <p class="text-label-md font-bold text-on-surface">
-                  {{ item.title }}
-                  <span class="ml-1 font-normal text-label-xs text-outline">{{ item.state }}</span>
-                </p>
-                <p class="mt-0.5 text-body-sm text-on-surface-variant">{{ item.detail }}</p>
-              </div>
-            </li>
-          </ul>
-        </BaseCard>
+          <BaseButton size="sm" variant="primary" icon="add" @click="openNewRun">New run</BaseButton>
+        </BaseEmptyState>
       </template>
     </div>
+
+    <PayrollPostDialog
+      :open="postOpen"
+      :journal="postRun.journal.value"
+      :reason="postRun.reason.value"
+      :posting="postRun.posting.value"
+      @close="postOpen = false"
+      @post="confirmPost(postingRow!)"
+    />
+
+    <BaseModal
+      :open="newRunOpen"
+      title="New payroll run"
+      description="A run starts as a draft and is calculated from the salary structures"
+      size="md"
+      @close="newRunOpen = false"
+    >
+      <div class="space-y-space-md">
+        <BaseSelect
+          v-model="newRunPeriod"
+          label="Period"
+          :options="periodOptions(availablePeriods)"
+          required
+        />
+        <BaseInput
+          v-model="newRunPaymentDate"
+          label="Payment date"
+          type="date"
+          required
+          hint="The date the salary is paid on. The statutory rules in force on this date are the ones the run uses."
+        />
+        <div v-if="newRunError" class="rounded-sm bg-error-container p-space-sm">
+          <p class="text-label-sm text-on-error-container">{{ newRunError }}</p>
+        </div>
+      </div>
+
+      <template #footer>
+        <BaseButton variant="text" @click="newRunOpen = false">Cancel</BaseButton>
+        <BaseButton variant="primary" icon="add" :loading="busy" @click="createRun">
+          Raise the run
+        </BaseButton>
+      </template>
+    </BaseModal>
   </div>
 </template>

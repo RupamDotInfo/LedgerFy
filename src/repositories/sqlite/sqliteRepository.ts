@@ -43,19 +43,29 @@ import type {
   OrderKind,
   OrderLine,
   PaymentTerm,
+  PayrollAccounts,
+  PayrollAttendance,
+  PayrollPayment,
+  PayrollRun,
+  PayrollSnapshot,
   PriceList,
   PriceListEntry,
   ProductionIssue,
   ProductionOrder,
   ProductionRequirement,
+  SalaryAssignment,
+  SalaryComponent,
+  SalaryStructure,
   StatementLine,
   StockGroup,
   StockLocationBalance,
   StockMovement,
   StockPoolBalance,
+  StatutoryRuleVersion,
   TaxCategory,
   Unit,
   Voucher,
+  VoucherEntry,
   VoucherType,
 } from '@/domain/types'
 import type {
@@ -65,6 +75,8 @@ import type {
   LedgerFyRepository,
   NewCompanyInput,
   RepositoryInfo,
+  SalaryStructureDetail,
+  PayrollRunDetail,
   VoucherFilters,
   VoucherNumbering,
 } from '@/repositories/contracts'
@@ -933,6 +945,162 @@ export class SqliteRepository implements LedgerFyRepository {
   /** The number a production voucher carries. */
   private async nextStockJournalNumber(companyId: string): Promise<string> {
     return invoke<string>('next_voucher_number_cmd', { companyId, kind: 'stock-journal' })
+  }
+
+  // -- Payroll ---------------------------------------------------------------
+
+  async listSalaryStructures(companyId: string): Promise<SalaryStructure[]> {
+    return invoke<SalaryStructure[]>('list_salary_structures_cmd', { companyId })
+  }
+
+  async getSalaryStructure(
+    companyId: string,
+    id: string,
+  ): Promise<SalaryStructureDetail | null> {
+    return invoke<SalaryStructureDetail | null>('get_salary_structure_cmd', { companyId, id })
+  }
+
+  /**
+   * Save a structure and its components.
+   *
+   * The components travel with the structure so that a version and the
+   * components that make it up are written together.
+   */
+  async saveSalaryStructure(
+    structure: SalaryStructure,
+    components: SalaryComponent[],
+  ): Promise<SalaryStructure> {
+    return invoke<SalaryStructure>('save_salary_structure_cmd', { structure, components })
+  }
+
+  async listSalaryAssignments(companyId: string): Promise<SalaryAssignment[]> {
+    return invoke<SalaryAssignment[]>('list_salary_assignments_cmd', { companyId })
+  }
+
+  async saveSalaryAssignment(assignment: SalaryAssignment): Promise<SalaryAssignment> {
+    return invoke<SalaryAssignment>('save_salary_assignment_cmd', { assignment })
+  }
+
+  async listAttendance(companyId: string, period: string): Promise<PayrollAttendance[]> {
+    return invoke<PayrollAttendance[]>('list_attendance_cmd', { companyId, period })
+  }
+
+  async saveAttendance(attendance: PayrollAttendance): Promise<PayrollAttendance> {
+    return invoke<PayrollAttendance>('save_attendance_cmd', { attendance })
+  }
+
+  async listPayrollRuns(companyId: string): Promise<PayrollRun[]> {
+    return invoke<PayrollRun[]>('list_payroll_runs_cmd', { companyId })
+  }
+
+  async getPayrollRun(companyId: string, id: string): Promise<PayrollRunDetail | null> {
+    return invoke<PayrollRunDetail | null>('get_payroll_run_cmd', { companyId, id })
+  }
+
+  /**
+   * Save a run and the snapshot it carries.
+   *
+   * The run is the header and the snapshots are its children: the header is
+   * written first, then the snapshot each employee's pay was taken from. The
+   * snapshot is computed by the domain and is never derived here.
+   */
+  async savePayrollRun(run: PayrollRun, snapshots: PayrollSnapshot[] = []): Promise<PayrollRun> {
+    const saved = await invoke<PayrollRun>('save_payroll_run_cmd', { run })
+    if (snapshots.length) {
+      await invoke<PayrollSnapshot[]>('save_payroll_snapshots_cmd', { snapshots })
+    }
+    return saved
+  }
+
+  async deletePayrollRun(companyId: string, id: string): Promise<void> {
+    await invoke<void>('delete_payroll_run_cmd', { companyId, id })
+  }
+
+  /**
+   * Post a payroll run.
+   *
+   * The journal is an ordinary journal voucher, so it obeys the same period
+   * locks as every other voucher. The voucher, its entries, the run's own
+   * state and the audit event are written in one transaction.
+   */
+  async postPayrollRun(
+    companyId: string,
+    id: string,
+    run: PayrollRun,
+    journal: Voucher,
+    entries: VoucherEntry[],
+  ): Promise<PayrollRun> {
+    const voucher: Voucher = {
+      ...journal,
+      companyId,
+      type: 'journal',
+      status: 'posted',
+      partyId: null,
+      items: [],
+      taxes: [],
+    }
+    const now = new Date().toISOString()
+    return invoke<PayrollRun>('post_payroll_run_cmd', {
+      companyId,
+      id,
+      payload: {
+        voucher,
+        entries,
+        items: [],
+        taxes: [],
+        allocations: [],
+        advances: [],
+        affectedPartyIds: [],
+        movements: [],
+        stockPools: [],
+        stockLocations: [],
+        orderFulfilments: [],
+        productionIssues: [],
+        productionCompletions: [],
+        auditEvents: [
+          {
+            id: `audit-payroll-posted-${run.id}`,
+            companyId,
+            actor: 'local.operator',
+            action: 'payroll.posted',
+            recordType: 'payroll-run',
+            recordId: run.id,
+            recordLabel: `${run.number} — salary posted`,
+            timestamp: now,
+            detail: `Payroll run ${run.number} for ${run.period} posted as ${voucher.number}`,
+          },
+        ],
+        actor: 'local.operator',
+      },
+    })
+  }
+
+  async listPayrollPayments(companyId: string, runId: string): Promise<PayrollPayment[]> {
+    return invoke<PayrollPayment[]>('list_payroll_payments_cmd', { companyId, runId })
+  }
+
+  async savePayrollPayment(payment: PayrollPayment): Promise<PayrollPayment> {
+    return invoke<PayrollPayment>('save_payroll_payment_cmd', { payment })
+  }
+
+  async getPayrollAccounts(companyId: string): Promise<PayrollAccounts | null> {
+    return invoke<PayrollAccounts | null>('get_payroll_accounts_cmd', { companyId })
+  }
+
+  async savePayrollAccounts(accounts: PayrollAccounts): Promise<PayrollAccounts> {
+    return invoke<PayrollAccounts>('save_payroll_accounts_cmd', { accounts })
+  }
+
+  async listStatutoryRules(companyId: string): Promise<StatutoryRuleVersion[]> {
+    return invoke<StatutoryRuleVersion[]>('list_statutory_rules_cmd', { companyId })
+  }
+
+  async saveStatutoryRule(rule: StatutoryRuleVersion): Promise<StatutoryRuleVersion> {
+    return invoke<StatutoryRuleVersion>('save_statutory_rule_cmd', { rule })
+  }
+
+  async nextPayrollNumber(companyId: string, period: string): Promise<string> {
+    return invoke<string>('payroll_number_cmd', { companyId, period })
   }
 }
 

@@ -37,6 +37,12 @@ import {
   type ProductionPostingContext,
 } from '@/domain/production'
 import { averageCost, divideRounded, lineValue, QUANTITY_SCALE, type Quantity } from '@/domain/quantity'
+import {
+  builtInRuleSets,
+  calculatePayroll,
+  summariseRun,
+  type PayrollCalculationInput,
+} from '@/domain/payroll'
 import { addDays } from '@/lib/datetime'
 import type { VoucherNumbering } from '@/repositories/contracts'
 import type {
@@ -59,17 +65,26 @@ import type {
   OrderRevision,
   OrderRevisionLine,
   PaymentTerm,
+  PayrollAccounts,
+  PayrollAttendance,
+  PayrollPayment,
+  PayrollRun,
+  PayrollSnapshot,
   PriceList,
   PriceListEntry,
   ProductionCompletion,
   ProductionIssue,
   ProductionOrder,
   ProductionRequirement,
+  SalaryAssignment,
+  SalaryComponent,
+  SalaryStructure,
   StatementLine,
   StockGroup,
   StockLocationBalance,
   StockMovement,
   StockPoolBalance,
+  StatutoryRuleVersion,
   TaxCategory,
   Unit,
   Voucher,
@@ -122,6 +137,15 @@ export interface DemoDataset {
   productionRequirements: ProductionRequirement[]
   productionIssues: ProductionIssue[]
   productionCompletions: ProductionCompletion[]
+  salaryStructures: SalaryStructure[]
+  salaryComponents: SalaryComponent[]
+  salaryAssignments: SalaryAssignment[]
+  payrollAttendance: PayrollAttendance[]
+  payrollRuns: PayrollRun[]
+  payrollSnapshots: PayrollSnapshot[]
+  payrollPayments: PayrollPayment[]
+  payrollAccounts: PayrollAccounts[]
+  statutoryRules: StatutoryRuleVersion[]
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +427,14 @@ function buildLedgers(
   push('Salaries Payable', 'liabilities', 'current-liabilities', 0)
   push('Outstanding Expenses', 'liabilities', 'current-liabilities', 0)
   push('TDS Payable', 'liabilities', 'current-liabilities', 0)
+  // The two accounts the payroll policy needs: what the employees contribute
+  // themselves, and what the employer owes on their behalf.
+  push('Provident Fund and ESI Payable', 'liabilities', 'current-liabilities', 0, {
+    isSystem: false,
+  })
+  push('Employer Contributions Payable', 'liabilities', 'current-liabilities', 0, {
+    isSystem: false,
+  })
   push('Sales', 'income', 'sales', 0, { isSystem: false })
   push('Service Income', 'income', 'sales', 0, { isSystem: false })
   push('Other Income', 'income', 'sales', 0, { isSystem: false })
@@ -503,6 +535,331 @@ function buildLedgers(
 }
 
 // ---------------------------------------------------------------------------
+// The sample payroll
+// ---------------------------------------------------------------------------
+
+/**
+ * The bases a component counts towards.
+ *
+ * The statutory wage bases differ: the provident fund and the state
+ * insurance are computed on the basic and the dearness allowance, while
+ * professional tax and salary tax are computed on the gross.
+ */
+const STATUTORY_BASES: SalaryComponent['bases'] = [
+  'gross-earnings',
+  'epf-wages',
+  'esic-wages',
+  'professional-tax-wages',
+  'salary-tds-wages',
+]
+
+const GROSS_BASES: SalaryComponent['bases'] = [
+  'gross-earnings',
+  'professional-tax-wages',
+  'salary-tds-wages',
+]
+
+/** The salary structures the sample books pay by. The amounts are in rupees. */
+const SALARY_BLUEPRINTS = [
+  {
+    name: 'Sales Executive',
+    components: [
+      { code: 'BASIC', name: 'Basic salary', amount: 9_000, bases: STATUTORY_BASES },
+      { code: 'DA', name: 'Dearness allowance', amount: 4_500, bases: STATUTORY_BASES },
+      { code: 'HRA', name: 'House rent allowance', amount: 4_000, bases: GROSS_BASES },
+      { code: 'CONV', name: 'Conveyance allowance', amount: 1_500, bases: GROSS_BASES },
+    ],
+  },
+  {
+    name: 'Accounts Executive',
+    components: [
+      { code: 'BASIC', name: 'Basic salary', amount: 16_000, bases: STATUTORY_BASES },
+      { code: 'DA', name: 'Dearness allowance', amount: 8_000, bases: STATUTORY_BASES },
+      { code: 'HRA', name: 'House rent allowance', amount: 6_000, bases: GROSS_BASES },
+      { code: 'SPECIAL', name: 'Special allowance', amount: 3_000, bases: GROSS_BASES },
+    ],
+  },
+  {
+    name: 'Store Supervisor',
+    components: [
+      { code: 'BASIC', name: 'Basic salary', amount: 20_000, bases: STATUTORY_BASES },
+      { code: 'DA', name: 'Dearness allowance', amount: 10_000, bases: STATUTORY_BASES },
+      { code: 'HRA', name: 'House rent allowance', amount: 8_000, bases: GROSS_BASES },
+      { code: 'SPECIAL', name: 'Special allowance', amount: 5_000, bases: GROSS_BASES },
+    ],
+  },
+]
+
+/** The period the sample payroll was run for. */
+const SAMPLE_PERIOD = '2026-09'
+const SAMPLE_PERIOD_START = '2026-09-01'
+const SAMPLE_PERIOD_END = '2026-09-30'
+const SAMPLE_PAYMENT_DATE = '2026-09-30'
+/** The period the sample workspace has open, waiting to be calculated. */
+const OPEN_PERIOD = '2026-10'
+const OPEN_PERIOD_START = '2026-10-01'
+const OPEN_PERIOD_END = '2026-10-31'
+const OPEN_PAYMENT_DATE = '2026-10-31'
+
+/** The state insurance wage ceiling, in minor units. */
+const ESIC_WAGE_CEILING = 2_100_000
+
+interface SalaryStructureSet {
+  structures: SalaryStructure[]
+  components: SalaryComponent[]
+  /** The gross each structure pays, in minor units. */
+  grossByStructure: Map<string, number>
+}
+
+/**
+ * The salary structures of a company, with the components that make them up.
+ *
+ * A structure is versioned. The sample books open at version 1, which has been
+ * in force since the books opened.
+ */
+function buildSalaryStructures(
+  companyId: string,
+  scale: number,
+  ids: IdFactory,
+): SalaryStructureSet {
+  const structures: SalaryStructure[] = []
+  const components: SalaryComponent[] = []
+  const grossByStructure = new Map<string, number>()
+
+  for (const blueprint of SALARY_BLUEPRINTS) {
+    const structure: SalaryStructure = {
+      id: ids.next('str'),
+      companyId,
+      name: blueprint.name,
+      version: 1,
+      effectiveFrom: '2025-04-01',
+      effectiveTo: null,
+      isActive: true,
+      createdAt: '2025-04-01T09:00:00.000Z',
+      updatedAt: '2025-04-01T09:00:00.000Z',
+    }
+    structures.push(structure)
+
+    let gross = 0
+    blueprint.components.forEach((component, index) => {
+      const amount = Math.round(component.amount * 100 * scale)
+      gross += amount
+      components.push({
+        id: ids.next('scm'),
+        companyId,
+        structureId: structure.id,
+        code: component.code,
+        name: component.name,
+        kind: 'earning',
+        calculation: { type: 'fixed', amount },
+        bases: component.bases,
+        position: index + 1,
+      })
+    })
+    grossByStructure.set(structure.id, gross)
+  }
+
+  return { structures, components, grossByStructure }
+}
+
+/**
+ * The statutory rules the company holds.
+ *
+ * They are the rules this build ships, with the status and the source each
+ * version carries, so a run says which rule it used and why.
+ */
+function buildStatutoryRules(companyId: string, ids: IdFactory): StatutoryRuleVersion[] {
+  return builtInRuleSets().flatMap((set) =>
+    set.versions.map((version) => ({
+      ...version,
+      id: ids.next('rul'),
+      companyId,
+      createdAt: '2026-04-01T09:00:00.000Z',
+    })),
+  )
+}
+
+interface SamplePayroll {
+  assignments: SalaryAssignment[]
+  attendance: PayrollAttendance[]
+  runs: PayrollRun[]
+  snapshots: PayrollSnapshot[]
+  accounts: PayrollAccounts
+}
+
+/**
+ * The payroll of a company: the assignments, the attendance, the run that has
+ * been calculated and the run that is waiting to be.
+ *
+ * The figures come from the domain, so the sample payroll is the engine's
+ * output and not a set of numbers written by hand.
+ */
+function buildSamplePayroll(
+  companyId: string,
+  employees: Employee[],
+  structures: SalaryStructure[],
+  components: SalaryComponent[],
+  rules: StatutoryRuleVersion[],
+  ledgers: Ledger[],
+  ids: IdFactory,
+): SamplePayroll {
+  const assignments: SalaryAssignment[] = []
+  const attendance: PayrollAttendance[] = []
+  const runs: PayrollRun[] = []
+  const snapshots: PayrollSnapshot[] = []
+
+  const structureOf = new Map<string, SalaryStructure>()
+  for (const structure of structures) structureOf.set(structure.id, structure)
+
+  // Every employee is paid by the structure that matches their grade.
+  for (const employee of employees) {
+    const structure = structures[employees.indexOf(employee) % structures.length]!
+    const assignment: SalaryAssignment = {
+      id: ids.next('asg'),
+      companyId,
+      employeeId: employee.id,
+      structureId: structure.id,
+      effectiveFrom: '2025-04-01',
+      effectiveTo: null,
+      createdAt: '2025-04-01T09:00:00.000Z',
+    }
+    assignments.push(assignment)
+  }
+
+  const payableEmployees = employees.filter((employee) => employee.isActive)
+
+  for (const period of [
+    { period: SAMPLE_PERIOD, days: 30 },
+    { period: OPEN_PERIOD, days: 31 },
+  ]) {
+    for (const employee of payableEmployees) {
+      const index = employees.indexOf(employee)
+      const lopDays = period.period === SAMPLE_PERIOD && index === 2 ? 2 : 0
+      const otherDeductions =
+        period.period === SAMPLE_PERIOD && index === 5 ? 100_000 : 0
+      attendance.push({
+        id: ids.next('att'),
+        companyId,
+        employeeId: employee.id,
+        period: period.period,
+        payableDays: period.days - lopDays,
+        lopDays,
+        extraDays: 0,
+        otherDeductions,
+        note: lopDays ? 'Unpaid leave' : otherDeductions ? 'Advance recovered' : '',
+        createdAt: `${period.period}-01T09:00:00.000Z`,
+        updatedAt: `${period.period}-01T09:00:00.000Z`,
+      })
+    }
+  }
+
+  // -- The run that has been calculated -------------------------------------
+  const runId = ids.next('run')
+  const calculations = payableEmployees.map((employee) => {
+    const assignment = assignments.find((entry) => entry.employeeId === employee.id)!
+    const structure = structureOf.get(assignment.structureId)!
+    const structureComponents = components.filter(
+      (component) => component.structureId === structure.id,
+    )
+    const record = attendance.find(
+      (entry) => entry.employeeId === employee.id && entry.period === SAMPLE_PERIOD,
+    )
+    const input: PayrollCalculationInput = {
+      employee,
+      structure,
+      components: structureComponents,
+      attendance: record ?? null,
+      rules,
+      period: SAMPLE_PERIOD,
+      periodStart: SAMPLE_PERIOD_START,
+      periodEnd: SAMPLE_PERIOD_END,
+      paymentDate: SAMPLE_PAYMENT_DATE,
+      daysInPeriod: 30,
+      monthsPaidInYear: 12,
+      declaredDeductions: 0,
+      projectedAnnualGross: structureComponents.reduce(
+        (sum, component) =>
+          component.calculation.type === 'fixed' ? sum + component.calculation.amount : sum,
+        0,
+      ) * 12,
+    }
+    return calculatePayroll(input).calculation
+  })
+
+  const totals = summariseRun(calculations)
+  runs.push({
+    id: runId,
+    companyId,
+    number: `PR-${SAMPLE_PERIOD}`,
+    period: SAMPLE_PERIOD,
+    periodStart: SAMPLE_PERIOD_START,
+    periodEnd: SAMPLE_PERIOD_END,
+    paymentDate: SAMPLE_PAYMENT_DATE,
+    status: 'calculated',
+    employeeCount: calculations.length,
+    grossEarnings: totals.grossEarnings,
+    employeeDeductions: totals.employeeDeductions,
+    statutoryDeductions: totals.statutoryDeductions,
+    employerContributions: totals.employerContributions,
+    netPay: totals.netPay,
+    journalVoucherId: null,
+    createdAt: '2026-09-01T09:00:00.000Z',
+    updatedAt: '2026-09-01T09:00:00.000Z',
+    revision: 1,
+  })
+
+  for (const calculation of calculations) {
+    snapshots.push({
+      id: ids.next('snp'),
+      companyId,
+      runId,
+      employeeId: calculation.employeeId,
+      snapshot: calculation,
+      createdAt: '2026-09-01T09:00:00.000Z',
+    })
+  }
+
+  // -- The run that is waiting to be calculated ------------------------------
+  runs.push({
+    id: ids.next('run'),
+    companyId,
+    number: `PR-${OPEN_PERIOD}`,
+    period: OPEN_PERIOD,
+    periodStart: OPEN_PERIOD_START,
+    periodEnd: OPEN_PERIOD_END,
+    paymentDate: OPEN_PAYMENT_DATE,
+    status: 'draft',
+    employeeCount: 0,
+    grossEarnings: 0,
+    employeeDeductions: 0,
+    statutoryDeductions: 0,
+    employerContributions: 0,
+    netPay: 0,
+    journalVoucherId: null,
+    createdAt: '2026-10-01T09:00:00.000Z',
+    updatedAt: '2026-10-01T09:00:00.000Z',
+    revision: 1,
+  })
+
+  // -- The accounts the payroll posts to ------------------------------------
+  const ledgerId = (name: string): string =>
+    ledgers.find((ledger) => ledger.companyId === companyId && ledger.name === name)!.id
+
+  const accounts: PayrollAccounts = {
+    id: ids.next('pac'),
+    companyId,
+    salaryExpenseLedgerId: ledgerId('Salaries and Wages'),
+    netSalaryPayableLedgerId: ledgerId('Salaries Payable'),
+    employeeDeductionsPayableLedgerId: ledgerId('Provident Fund and ESI Payable'),
+    statutoryDeductionsPayableLedgerId: ledgerId('TDS Payable'),
+    employerContributionsPayableLedgerId: ledgerId('Employer Contributions Payable'),
+    createdAt: '2026-04-01T09:00:00.000Z',
+  }
+
+  return { assignments, attendance, runs, snapshots, accounts }
+}
+
+// ---------------------------------------------------------------------------
 // Dataset assembly
 // ---------------------------------------------------------------------------
 
@@ -545,6 +902,15 @@ export function createDemoDataset(): DemoDataset {
   const productionRequirements: ProductionRequirement[] = []
   const productionIssues: ProductionIssue[] = []
   const productionCompletions: ProductionCompletion[] = []
+  const salaryStructures: SalaryStructure[] = []
+  const salaryComponents: SalaryComponent[] = []
+  const salaryAssignments: SalaryAssignment[] = []
+  const payrollAttendance: PayrollAttendance[] = []
+  const payrollRuns: PayrollRun[] = []
+  const payrollSnapshots: PayrollSnapshot[] = []
+  const payrollPayments: PayrollPayment[] = []
+  const payrollAccounts: PayrollAccounts[] = []
+  const statutoryRules: StatutoryRuleVersion[] = []
 
   for (const blueprint of COMPANY_BLUEPRINTS) {
     const company: Company = {
@@ -696,28 +1062,84 @@ export function createDemoDataset(): DemoDataset {
     }))
     costCentres.push(...companyCostCentres)
 
-    const companyEmployees: Employee[] = Array.from({ length: 9 }, (_, index) => ({
-      id: ids.next('emp'),
-      companyId: company.id,
-      name: [
-        'Ramesh Patel',
-        'Sneha Iyer',
-        'Imran Qureshi',
-        'Divya Menon',
-        'Harpreet Singh',
-        'Anjali Deshpande',
-        'Vikram Rathore',
-        'Farhan Ali',
-        'Meera Krishnan',
-      ][index]!,
-      code: `EMP-${String(index + 1).padStart(3, '0')}`,
-      department: ['Accounts', 'Sales', 'Operations', 'Stores', 'Service'][index % 5]!,
-      designation: ['Executive', 'Senior Executive', 'Manager', 'Assistant Manager'][index % 4]!,
-      dateOfJoining: `20${18 + (index % 8)}-0${(index % 9) + 1}-1${index % 10}`,
-      monthlyGross: (28_000 + index * 4_500) * 100 * blueprint.scale,
-      isActive: index !== 7,
-    }))
+    // The salary structures the employees are paid by, and the statutory
+    // rules the company holds.
+    const salarySet = buildSalaryStructures(company.id, blueprint.scale, ids)
+    salaryStructures.push(...salarySet.structures)
+    salaryComponents.push(...salarySet.components)
+    const companyRules = buildStatutoryRules(company.id, ids)
+    statutoryRules.push(...companyRules)
+
+    const companyEmployees: Employee[] = Array.from({ length: 9 }, (_, index) => {
+      const structure = salarySet.structures[index % salarySet.structures.length]!
+      const monthlyGross = salarySet.grossByStructure.get(structure.id)!
+      return {
+        id: ids.next('emp'),
+        companyId: company.id,
+        name: [
+          'Ramesh Patel',
+          'Sneha Iyer',
+          'Imran Qureshi',
+          'Divya Menon',
+          'Harpreet Singh',
+          'Anjali Deshpande',
+          'Vikram Rathore',
+          'Farhan Ali',
+          'Meera Krishnan',
+        ][index]!,
+        code: `EMP-${String(index + 1).padStart(3, '0')}`,
+        department: ['Accounts', 'Sales', 'Operations', 'Stores', 'Service'][index % 5]!,
+        designation: ['Executive', 'Senior Executive', 'Manager', 'Assistant Manager'][index % 4]!,
+        dateOfJoining: `20${18 + (index % 8)}-0${(index % 9) + 1}-1${index % 10}`,
+        // The master gross is what the salary structure pays, so the two agree.
+        monthlyGross,
+        isActive: index !== 7,
+        costCentreId: companyCostCentres[index % companyCostCentres.length]!.id,
+        pan: [
+          'ABCPB1234F',
+          'ACDPS5678K',
+          'AAQPR9012M',
+          'AFTPL3456N',
+          'AGJQR7890P',
+          'AHDPS2345Q',
+          'AIFQR6789R',
+          'AGKPS4567S',
+          'AELQR8901T',
+        ][index]!,
+        // One employee in five has chosen the old regime, so both scales are
+        // exercised by the sample books.
+        taxRegime: index % 5 === 0 ? 'old' : 'new',
+        isProvidentFundMember: true,
+        // The state insurance covers only the employees whose wages are within
+        // its ceiling.
+        isStateInsuranceMember: monthlyGross <= ESIC_WAGE_CEILING,
+        isPersonWithDisability: false,
+        // The only professional tax schedule this build carries is West
+        // Bengal's, and none of the sample companies is in West Bengal.
+        professionalTaxJurisdiction: null,
+        bankName: ['HDFC Bank', 'ICICI Bank', 'State Bank of India'][index % 3]!,
+        bankAccountNumber: `501002345678${String(index).padStart(2, '0')}`,
+        bankIfsc: ['HDFC0001234', 'ICIC0001234', 'SBIN0001234'][index % 3]!,
+      }
+    })
     employees.push(...companyEmployees)
+
+    // The payroll of the company: the assignments, the attendance, the run
+    // that has been calculated and the accounts it posts to.
+    const payroll = buildSamplePayroll(
+      company.id,
+      companyEmployees,
+      salarySet.structures,
+      salarySet.components,
+      companyRules,
+      companyLedgers,
+      ids,
+    )
+    salaryAssignments.push(...payroll.assignments)
+    payrollAttendance.push(...payroll.attendance)
+    payrollRuns.push(...payroll.runs)
+    payrollSnapshots.push(...payroll.snapshots)
+    payrollAccounts.push(payroll.accounts)
 
     currencies.push(
       {
@@ -1963,6 +2385,15 @@ export function createDemoDataset(): DemoDataset {
     productionRequirements,
     productionIssues,
     productionCompletions,
+    salaryStructures,
+    salaryComponents,
+    salaryAssignments,
+    payrollAttendance,
+    payrollRuns,
+    payrollSnapshots,
+    payrollPayments,
+    payrollAccounts,
+    statutoryRules,
   }
 }
 

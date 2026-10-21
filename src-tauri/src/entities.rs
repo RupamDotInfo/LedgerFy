@@ -189,6 +189,31 @@ dto! {
         pub date_of_joining: String,
         pub monthly_gross: i64,
         pub is_active: bool,
+        /// The cost centre the employee belongs to.
+        pub cost_centre_id: Option<String>,
+        /// The employee's tax number, needed to remit the tax deducted at
+        /// source. It is never shown in full and never logged.
+        pub pan: Option<String>,
+        /// The tax regime the employee has chosen, which decides the slabs.
+        pub tax_regime: Option<String>,
+        /// Whether the employee contributes to the provident fund.
+        #[serde(default)]
+        pub is_provident_fund_member: bool,
+        /// Whether the employee is covered by the state insurance scheme.
+        #[serde(default)]
+        pub is_state_insurance_member: bool,
+        /// Whether the employee is a person with a disability, whose state
+        /// insurance wage ceiling is higher.
+        #[serde(default)]
+        pub is_person_with_disability: bool,
+        /// The state or territory whose professional tax applies.
+        pub professional_tax_jurisdiction: Option<String>,
+        /// The bank the salary is paid to.
+        pub bank_name: Option<String>,
+        /// The account the salary is paid to. Never shown in full.
+        pub bank_account_number: Option<String>,
+        /// The branch identifier of the account. Never shown in full.
+        pub bank_ifsc: Option<String>,
     }
 }
 
@@ -907,6 +932,222 @@ pub struct BackupInfo {
     pub created_at: String,
     /// True when the snapshot was reopened and its contents verified.
     pub verified: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Payroll
+// ---------------------------------------------------------------------------
+
+dto! {
+    /// One component of a salary structure.
+    ///
+    /// A component of a released structure never changes; a change means a new
+    /// version of the structure.
+    pub struct SalaryComponent {
+        pub id: String,
+        pub company_id: String,
+        pub structure_id: String,
+        /// The component's code, unique within the structure.
+        pub code: String,
+        pub name: String,
+        /// What the component does to the pay: `earning`,
+        /// `employer-contribution`, `employee-deduction` or `reimbursement`.
+        pub kind: String,
+        /// How the component is computed, as a JSON document.
+        #[serde(default)]
+        pub calculation: serde_json::Value,
+        /// The statutory bases this component counts towards, as a JSON array.
+        #[serde(default)]
+        pub bases: serde_json::Value,
+        /// The order the component is calculated in.
+        pub position: i64,
+    }
+}
+
+dto! {
+    /// A salary structure, versioned and effective-dated.
+    pub struct SalaryStructure {
+        pub id: String,
+        pub company_id: String,
+        pub name: String,
+        pub version: i64,
+        /// The date from which this version applies.
+        pub effective_from: String,
+        /// The date after which it no longer applies. Null while it is the
+        /// current one.
+        pub effective_to: Option<String>,
+        pub is_active: bool,
+        pub created_at: String,
+        pub updated_at: String,
+    }
+}
+
+dto! {
+    /// A salary structure and the components it is made of.
+    pub struct SalaryStructureDetail {
+        pub structure: SalaryStructure,
+        pub components: Vec<SalaryComponent>,
+    }
+}
+
+dto! {
+    /// An employee's assignment to a salary structure, from a date.
+    pub struct SalaryAssignment {
+        pub id: String,
+        pub company_id: String,
+        pub employee_id: String,
+        pub structure_id: String,
+        pub effective_from: String,
+        pub effective_to: Option<String>,
+        pub created_at: String,
+    }
+}
+
+dto! {
+    /// What happened in a period for one employee.
+    pub struct PayrollAttendance {
+        pub id: String,
+        pub company_id: String,
+        pub employee_id: String,
+        /// The period, as `YYYY-MM`.
+        pub period: String,
+        /// The days the employee is paid for.
+        pub payable_days: i64,
+        /// The days lost without pay.
+        pub lop_days: i64,
+        /// Days paid at a different rate, such as overtime.
+        pub extra_days: i64,
+        /// Other deductions recovered from the employee, in minor units.
+        pub other_deductions: i64,
+        pub note: String,
+        pub created_at: String,
+        pub updated_at: String,
+    }
+}
+
+dto! {
+    /// A payroll run: the calculation and the posting of one period's pay.
+    pub struct PayrollRun {
+        pub id: String,
+        pub company_id: String,
+        /// The run number, e.g. `PR-2026-04`.
+        pub number: String,
+        /// The period, as `YYYY-MM`.
+        pub period: String,
+        pub period_start: String,
+        pub period_end: String,
+        /// The date the salary is paid, which the tax rule is chosen by.
+        pub payment_date: String,
+        /// `draft`, `calculated`, `approved`, `posted`, `paid`, `cancelled` or
+        /// `reversed`.
+        pub status: String,
+        /// The employees in the run.
+        pub employee_count: i64,
+        /// The totals, in minor units.
+        pub gross_earnings: i64,
+        pub employee_deductions: i64,
+        pub statutory_deductions: i64,
+        pub employer_contributions: i64,
+        pub net_pay: i64,
+        /// The journal voucher that carries the payroll, once it is posted.
+        pub journal_voucher_id: Option<String>,
+        pub created_at: String,
+        pub updated_at: String,
+        pub revision: i64,
+    }
+}
+
+dto! {
+    /// One employee's pay, as it was calculated.
+    ///
+    /// The snapshot is never recomputed, so the payslip is rendered from it.
+    pub struct PayrollSnapshot {
+        pub id: String,
+        pub company_id: String,
+        pub run_id: String,
+        pub employee_id: String,
+        /// The figures, exactly as they were calculated, as a JSON document.
+        #[serde(default)]
+        pub snapshot: serde_json::Value,
+        pub created_at: String,
+    }
+}
+
+dto! {
+    /// A payroll run and the snapshots it carries.
+    pub struct PayrollRunDetail {
+        pub run: PayrollRun,
+        pub snapshots: Vec<PayrollSnapshot>,
+    }
+}
+
+dto! {
+    /// A payment of salary, settled by a payment voucher.
+    pub struct PayrollPayment {
+        pub id: String,
+        pub company_id: String,
+        pub run_id: String,
+        pub employee_id: String,
+        /// The amount paid.
+        pub amount: i64,
+        /// The payment voucher that settled it.
+        pub payment_voucher_id: Option<String>,
+        /// The date it was paid.
+        pub paid_on: String,
+        pub created_at: String,
+    }
+}
+
+dto! {
+    /// The company's payroll accounts.
+    pub struct PayrollAccounts {
+        pub id: String,
+        pub company_id: String,
+        /// The cost of employment: the earnings and the employer's
+        /// contributions.
+        pub salary_expense_ledger_id: String,
+        /// What is owed to the employees.
+        pub net_salary_payable_ledger_id: String,
+        /// The employees' own provident fund and state insurance.
+        pub employee_deductions_payable_ledger_id: String,
+        /// Professional tax and salary tax deducted at source.
+        pub statutory_deductions_payable_ledger_id: String,
+        /// The employer's provident fund and state insurance.
+        pub employer_contributions_payable_ledger_id: String,
+        pub created_at: String,
+    }
+}
+
+dto! {
+    /// One version of a statutory rule, effective-dated.
+    ///
+    /// A rule carries its source and its status. A rule that is not in force
+    /// blocks the run until a person with the authority to decide
+    /// acknowledges it, and the acknowledgement is recorded.
+    pub struct StatutoryRuleVersion {
+        pub id: String,
+        pub company_id: String,
+        /// The rule set: `epf`, `esic`, `professional-tax` or `salary-tds`.
+        pub rule_set: String,
+        /// The date from which this version applies.
+        pub effective_from: String,
+        /// The date after which it no longer applies. Null for the current one.
+        pub effective_to: Option<String>,
+        /// `in-force`, `proposed` or `out-of-scope`.
+        pub status: String,
+        /// Where the rule came from.
+        pub source: String,
+        /// A short statement of what the rule says.
+        pub summary: String,
+        /// The parameters of the rule, as a JSON document.
+        #[serde(default)]
+        pub parameters: serde_json::Value,
+        /// True when a person has acknowledged a rule that is not in force.
+        pub acknowledged: bool,
+        pub acknowledged_by: Option<String>,
+        pub acknowledged_at: Option<String>,
+        pub created_at: String,
+    }
 }
 
 #[cfg(test)]

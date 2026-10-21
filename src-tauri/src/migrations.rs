@@ -781,6 +781,204 @@ ALTER TABLE voucher_items ADD COLUMN to_godown_id TEXT;
 -- The direct cost of an item, kept beside the stock it belongs to.
 ALTER TABLE items ADD COLUMN direct_cost INTEGER;
 "#,
+},
+Migration {
+    version: 6,
+    name: "payroll",
+    sql: r#"
+-- Salary structures -------------------------------------------------------
+-- What an employee is paid, versioned and effective-dated. A version that has
+-- been used is never edited: a change is a new version of the same structure.
+CREATE TABLE salary_structures (
+    id              TEXT PRIMARY KEY,
+    company_id      TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    version         INTEGER NOT NULL,
+    effective_from  TEXT NOT NULL,
+    effective_to    TEXT,
+    is_active       INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    UNIQUE (company_id, id),
+    UNIQUE (company_id, name, version),
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_salary_structures_company_name
+    ON salary_structures(company_id, name, effective_from);
+
+-- The components of a structure. The calculation is a JSON document and the
+-- bases are a JSON array, so the shape the domain uses survives the round trip
+-- unchanged.
+CREATE TABLE salary_structure_components (
+    id            TEXT PRIMARY KEY,
+    company_id    TEXT NOT NULL,
+    structure_id  TEXT NOT NULL,
+    code          TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    calculation   TEXT NOT NULL,
+    bases         TEXT NOT NULL,
+    position      INTEGER NOT NULL,
+    created_at    TEXT NOT NULL,
+    UNIQUE (company_id, id),
+    UNIQUE (company_id, structure_id, code),
+    FOREIGN KEY (structure_id, company_id) REFERENCES salary_structures(id, company_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_salary_structure_components_structure
+    ON salary_structure_components(structure_id);
+
+-- Which structure an employee is on, from a date.
+CREATE TABLE salary_assignments (
+    id              TEXT PRIMARY KEY,
+    company_id      TEXT NOT NULL,
+    employee_id     TEXT NOT NULL,
+    structure_id    TEXT NOT NULL,
+    effective_from  TEXT NOT NULL,
+    effective_to    TEXT,
+    created_at      TEXT NOT NULL,
+    UNIQUE (company_id, id),
+    FOREIGN KEY (employee_id, company_id) REFERENCES employees(id, company_id) ON DELETE CASCADE,
+    FOREIGN KEY (structure_id, company_id) REFERENCES salary_structures(id, company_id)
+);
+CREATE INDEX idx_salary_assignments_employee
+    ON salary_assignments(company_id, employee_id, effective_from);
+
+-- What happened in a period for one employee.
+CREATE TABLE payroll_attendance (
+    id                TEXT PRIMARY KEY,
+    company_id        TEXT NOT NULL,
+    employee_id       TEXT NOT NULL,
+    period            TEXT NOT NULL,
+    payable_days      INTEGER NOT NULL DEFAULT 0,
+    lop_days          INTEGER NOT NULL DEFAULT 0,
+    extra_days        INTEGER NOT NULL DEFAULT 0,
+    other_deductions  INTEGER NOT NULL DEFAULT 0,
+    note              TEXT NOT NULL DEFAULT '',
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    UNIQUE (company_id, id),
+    UNIQUE (company_id, employee_id, period),
+    FOREIGN KEY (employee_id, company_id) REFERENCES employees(id, company_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_payroll_attendance_period ON payroll_attendance(company_id, period);
+
+-- A payroll run -------------------------------------------------------------
+-- The calculation and the posting of one period's pay. It is a record of its
+-- own, with a lifecycle, so it carries its state and the journal it produced.
+CREATE TABLE payroll_runs (
+    id                      TEXT PRIMARY KEY,
+    company_id              TEXT NOT NULL,
+    number                  TEXT NOT NULL,
+    period                  TEXT NOT NULL,
+    period_start            TEXT NOT NULL,
+    period_end              TEXT NOT NULL,
+    payment_date            TEXT NOT NULL,
+    status                  TEXT NOT NULL,
+    employee_count          INTEGER NOT NULL DEFAULT 0,
+    gross_earnings          INTEGER NOT NULL DEFAULT 0,
+    employee_deductions     INTEGER NOT NULL DEFAULT 0,
+    statutory_deductions    INTEGER NOT NULL DEFAULT 0,
+    employer_contributions  INTEGER NOT NULL DEFAULT 0,
+    net_pay                 INTEGER NOT NULL DEFAULT 0,
+    journal_voucher_id      TEXT,
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL,
+    revision                INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (company_id, id),
+    UNIQUE (company_id, number),
+    UNIQUE (company_id, journal_voucher_id),
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_payroll_runs_company_period ON payroll_runs(company_id, period);
+
+-- The snapshot of one employee's pay. It is never recomputed, so the payslip
+-- says what it said when it was issued.
+CREATE TABLE payroll_run_snapshots (
+    id           TEXT PRIMARY KEY,
+    company_id   TEXT NOT NULL,
+    run_id       TEXT NOT NULL,
+    employee_id  TEXT NOT NULL,
+    snapshot     TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    UNIQUE (company_id, id),
+    UNIQUE (company_id, run_id, employee_id),
+    FOREIGN KEY (run_id, company_id) REFERENCES payroll_runs(id, company_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_payroll_run_snapshots_run ON payroll_run_snapshots(run_id);
+
+-- A payment of salary, settled by a payment voucher.
+CREATE TABLE payroll_payments (
+    id                 TEXT PRIMARY KEY,
+    company_id         TEXT NOT NULL,
+    run_id             TEXT NOT NULL,
+    employee_id        TEXT NOT NULL,
+    amount             INTEGER NOT NULL DEFAULT 0,
+    payment_voucher_id TEXT,
+    paid_on            TEXT NOT NULL,
+    created_at         TEXT NOT NULL,
+    UNIQUE (company_id, id),
+    FOREIGN KEY (run_id, company_id) REFERENCES payroll_runs(id, company_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_payroll_payments_run ON payroll_payments(run_id);
+
+-- The company's payroll accounts. They are configured once, in the same way
+-- the inventory accounts are, so that no ledger identifier is ever invented.
+CREATE TABLE payroll_accounts (
+    id                                    TEXT PRIMARY KEY,
+    company_id                            TEXT NOT NULL UNIQUE,
+    salary_expense_ledger_id              TEXT NOT NULL,
+    net_salary_payable_ledger_id          TEXT NOT NULL,
+    employee_deductions_payable_ledger_id TEXT NOT NULL,
+    statutory_deductions_payable_ledger_id TEXT NOT NULL,
+    employer_contributions_payable_ledger_id TEXT NOT NULL,
+    created_at                            TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+);
+
+-- Statutory rules ------------------------------------------------------------
+-- Each rule is effective-dated and carries its source, so a person running
+-- the payroll can see where a figure came from.
+CREATE TABLE statutory_rule_versions (
+    id               TEXT PRIMARY KEY,
+    company_id       TEXT NOT NULL,
+    rule_set         TEXT NOT NULL,
+    effective_from   TEXT NOT NULL,
+    effective_to     TEXT,
+    status           TEXT NOT NULL,
+    source           TEXT NOT NULL,
+    summary          TEXT NOT NULL DEFAULT '',
+    parameters       TEXT NOT NULL,
+    acknowledged     INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged IN (0, 1)),
+    acknowledged_by  TEXT,
+    acknowledged_at  TEXT,
+    created_at       TEXT NOT NULL,
+    UNIQUE (company_id, id),
+    UNIQUE (company_id, rule_set, effective_from),
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_statutory_rule_versions_company
+    ON statutory_rule_versions(company_id, rule_set, effective_from);
+
+-- A unique index on the parent key columns, so the composite foreign keys
+-- above are enforceable.
+CREATE UNIQUE INDEX idx_employees_id_company ON employees(id, company_id);
+CREATE UNIQUE INDEX idx_salary_structures_id_company ON salary_structures(id, company_id);
+CREATE UNIQUE INDEX idx_payroll_runs_id_company ON payroll_runs(id, company_id);
+
+-- The employee, as the payroll needs them: the cost centre they belong to,
+-- their tax number and regime, the schemes they contribute to, the state
+-- whose professional tax applies and the bank the salary is paid to.
+ALTER TABLE employees ADD COLUMN cost_centre_id TEXT;
+ALTER TABLE employees ADD COLUMN pan TEXT;
+ALTER TABLE employees ADD COLUMN tax_regime TEXT;
+ALTER TABLE employees ADD COLUMN is_provident_fund_member INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE employees ADD COLUMN is_state_insurance_member INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE employees ADD COLUMN is_person_with_disability INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE employees ADD COLUMN professional_tax_jurisdiction TEXT;
+ALTER TABLE employees ADD COLUMN bank_name TEXT;
+ALTER TABLE employees ADD COLUMN bank_account_number TEXT;
+ALTER TABLE employees ADD COLUMN bank_ifsc TEXT;
+"#,
 }];
 
 /// Latest schema version this build understands.
@@ -996,7 +1194,11 @@ mod tests {
         let outcome = migrate(&mut conn).unwrap();
         assert_eq!(outcome.from_version, 3);
         assert_eq!(outcome.to_version, latest_version());
-        assert_eq!(outcome.applied, vec![4, 5]);
+        assert_eq!(
+            outcome.applied,
+            (4..=latest_version()).collect::<Vec<i64>>(),
+            "every migration after the earlier build must be applied, in order"
+        );
 
         // The company of the earlier build is still there.
         let name: String = conn
@@ -1019,6 +1221,15 @@ mod tests {
             "production_requirements",
             "production_issues",
             "production_completions",
+            "salary_structures",
+            "salary_structure_components",
+            "salary_assignments",
+            "payroll_attendance",
+            "payroll_runs",
+            "payroll_run_snapshots",
+            "payroll_payments",
+            "payroll_accounts",
+            "statutory_rule_versions",
         ] {
             let count: i64 = conn
                 .query_row(

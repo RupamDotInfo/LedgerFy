@@ -10,16 +10,18 @@ import BaseModal from '@/components/ui/BaseModal.vue'
 import BasePagination from '@/components/ui/BasePagination.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
 import BaseSkeleton from '@/components/ui/BaseSkeleton.vue'
+import BaseSwitch from '@/components/ui/BaseSwitch.vue'
 import DataTable from '@/components/ui/DataTable.vue'
 import FilterBar from '@/components/ui/FilterBar.vue'
 import MaterialIcon from '@/components/ui/MaterialIcon.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StatTile from '@/components/ui/StatTile.vue'
-import { useToastStore } from '@/stores/toast'
-import { useSessionStore } from '@/stores/session'
+import { maskIdentifier } from '@/domain/payroll'
 import type { Employee } from '@/domain/types'
+import { todayIso } from '@/lib/datetime'
 import { formatMoney, toMinor, type Money } from '@/lib/money'
-import { formatDate, todayIso } from '@/lib/datetime'
+import { useSessionStore } from '@/stores/session'
+import { useToastStore } from '@/stores/toast'
 
 const session = useSessionStore()
 const toast = useToastStore()
@@ -46,7 +48,13 @@ type EmployeeRow = {
   dateOfJoining: string
   monthlyGross: Money
   isActive: boolean
-  source: 'master' | 'session'
+  costCentre: string
+  taxRegime: string
+  providentFund: boolean
+  stateInsurance: boolean
+  professionalTax: string
+  pan: string
+  bankAccount: string
 }
 
 const columns: TableColumnSpec[] = [
@@ -54,10 +62,12 @@ const columns: TableColumnSpec[] = [
   { key: 'name', label: 'Name', sortable: true },
   { key: 'department', label: 'Department', sortable: true },
   { key: 'designation', label: 'Designation' },
-  { key: 'dateOfJoining', label: 'Date of joining', sortable: true },
+  { key: 'contributions', label: 'Contributions' },
+  { key: 'pan', label: 'Tax number' },
+  { key: 'bankAccount', label: 'Bank account' },
   { key: 'monthlyGross', label: 'Monthly gross', align: 'right', numeric: true, sortable: true },
   { key: 'status', label: 'State' },
-  { key: 'source', label: 'Source' },
+  { key: 'actions', label: '', width: '96px' },
 ]
 
 const EmptyIcon = () => h(MaterialIcon, { name: 'person_search', size: 19 })
@@ -71,18 +81,19 @@ const department = ref('all')
 const page = ref(1)
 const pageSize = ref(25)
 const modalOpen = ref(false)
-
-/**
- * Employees added from this screen. The repository has no employee save
- * method, so these are held in the session only and are never written to
- * the books.
- */
-const sessionEmployees = ref<Employee[]>([])
+const saving = ref(false)
+const editingId = ref<string | null>(null)
 
 const company = computed(() => session.activeCompany)
 const currency = computed(() => company.value?.baseCurrency ?? 'INR')
 
-const employees = computed<Employee[]>(() => [...session.employees, ...sessionEmployees.value])
+/** The employees the repository holds for this company. */
+const employees = computed<Employee[]>(() => session.employees)
+
+const costCentreName = (id: string | null | undefined): string => {
+  if (!id) return 'Not recorded'
+  return session.costCentres.find((centre) => centre.id === id)?.name ?? 'Not recorded'
+}
 
 const departments = computed(() => {
   const names = new Set<string>()
@@ -97,6 +108,16 @@ const departmentOptions = computed(() => [
   ...departments.value.map((name) => ({ value: name, label: name })),
 ])
 
+const costCentreOptions = computed(() => [
+  { value: '', label: 'Not recorded' },
+  ...session.costCentres.map((centre) => ({ value: centre.id, label: centre.name })),
+])
+
+const taxRegimeOptions = [
+  { value: 'new', label: 'New regime' },
+  { value: 'old', label: 'Old regime' },
+]
+
 const filtered = computed<EmployeeRow[]>(() => {
   const term = search.value.trim().toLowerCase()
   const rows = employees.value.map((employee) => ({
@@ -108,9 +129,14 @@ const filtered = computed<EmployeeRow[]>(() => {
     dateOfJoining: employee.dateOfJoining,
     monthlyGross: employee.monthlyGross,
     isActive: employee.isActive,
-    source: sessionEmployees.value.some((candidate) => candidate.id === employee.id)
-      ? ('session' as const)
-      : ('master' as const),
+    costCentre: costCentreName(employee.costCentreId),
+    taxRegime: employee.taxRegime === 'old' ? 'Old regime' : 'New regime',
+    providentFund: employee.isProvidentFundMember,
+    stateInsurance: employee.isStateInsuranceMember,
+    professionalTax: employee.professionalTaxJurisdiction ?? 'Not applicable',
+    // The tax number and the account number are never shown in full.
+    pan: maskIdentifier(employee.pan),
+    bankAccount: maskIdentifier(employee.bankAccountNumber),
   }))
   return rows.filter((row) => {
     if (department.value !== 'all' && row.department !== department.value) return false
@@ -132,7 +158,7 @@ const monthlyGrossTotal = computed(() =>
 )
 
 /* ------------------------------------------------------------------ *
- * Add-employee form
+ * The employee form
  * ------------------------------------------------------------------ */
 
 interface FormState {
@@ -142,6 +168,16 @@ interface FormState {
   designation: string
   dateOfJoining: string
   monthlyGross: string
+  costCentreId: string
+  pan: string
+  taxRegime: string
+  isProvidentFundMember: boolean
+  isStateInsuranceMember: boolean
+  isPersonWithDisability: boolean
+  professionalTaxJurisdiction: string
+  bankName: string
+  bankAccountNumber: string
+  bankIfsc: string
 }
 
 const form = ref<FormState>(emptyForm())
@@ -155,11 +191,46 @@ function emptyForm(): FormState {
     designation: '',
     dateOfJoining: todayIso(),
     monthlyGross: '',
+    costCentreId: '',
+    pan: '',
+    taxRegime: 'new',
+    isProvidentFundMember: true,
+    isStateInsuranceMember: false,
+    isPersonWithDisability: false,
+    professionalTaxJurisdiction: '',
+    bankName: '',
+    bankAccountNumber: '',
+    bankIfsc: '',
   }
 }
 
-function openModal() {
+function openCreate() {
+  editingId.value = null
   form.value = emptyForm()
+  errors.value = {}
+  modalOpen.value = true
+}
+
+function openEdit(employee: Employee) {
+  editingId.value = employee.id
+  form.value = {
+    name: employee.name,
+    code: employee.code,
+    department: employee.department,
+    designation: employee.designation,
+    dateOfJoining: employee.dateOfJoining,
+    monthlyGross: String(employee.monthlyGross / 100),
+    costCentreId: employee.costCentreId ?? '',
+    pan: employee.pan ?? '',
+    taxRegime: employee.taxRegime ?? 'new',
+    isProvidentFundMember: employee.isProvidentFundMember,
+    isStateInsuranceMember: employee.isStateInsuranceMember,
+    isPersonWithDisability: employee.isPersonWithDisability,
+    professionalTaxJurisdiction: employee.professionalTaxJurisdiction ?? '',
+    bankName: employee.bankName ?? '',
+    bankAccountNumber: employee.bankAccountNumber ?? '',
+    bankIfsc: employee.bankIfsc ?? '',
+  }
   errors.value = {}
   modalOpen.value = true
 }
@@ -177,7 +248,8 @@ function validate(): boolean {
   if (!code) next.code = 'Enter an employee code.'
   else if (
     employees.value.some(
-      (employee) => employee.code.trim().toLowerCase() === code.toLowerCase(),
+      (employee) =>
+        employee.id !== editingId.value && employee.code.trim().toLowerCase() === code.toLowerCase(),
     )
   ) {
     next.code = 'This employee code is already in use.'
@@ -188,30 +260,77 @@ function validate(): boolean {
     next.monthlyGross = 'Enter the monthly gross as a positive amount, for example 28000.'
   }
 
+  const pan = form.value.pan.trim()
+  if (pan && !/^[A-Za-z]{5}\d{4}[A-Za-z]$/.test(pan)) {
+    next.pan = 'Enter the tax number as five letters, four digits and one letter.'
+  }
+
+  const account = form.value.bankAccountNumber.trim()
+  if (account && !/^\d{6,18}$/.test(account)) {
+    next.bankAccountNumber = 'Enter the account number as digits only.'
+  }
+
+  const ifsc = form.value.bankIfsc.trim()
+  if (ifsc && !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc.toUpperCase())) {
+    next.bankIfsc = 'Enter the branch identifier as four letters, a zero and six characters.'
+  }
+
   errors.value = next
   return Object.keys(next).length === 0
 }
 
-function save() {
+async function save() {
   if (!validate()) return
+  const companyId = session.activeCompanyId
+  if (!companyId) {
+    toast.error('No company is open', 'Open a company before saving an employee.')
+    return
+  }
+
   const grossText = form.value.monthlyGross.trim()
+  const existing = editingId.value
+    ? employees.value.find((employee) => employee.id === editingId.value)
+    : undefined
+
   const employee: Employee = {
-    id: `emp-session-${Date.now()}`,
-    companyId: session.activeCompanyId ?? '',
+    id: existing?.id ?? `emp-${Date.now().toString(36)}`,
+    companyId,
     name: form.value.name.trim(),
     code: form.value.code.trim(),
     department: form.value.department.trim(),
     designation: form.value.designation.trim(),
     dateOfJoining: form.value.dateOfJoining || todayIso(),
     monthlyGross: grossText ? toMinor(grossText, 100) : 0,
-    isActive: true,
+    isActive: existing?.isActive ?? true,
+    costCentreId: form.value.costCentreId || null,
+    pan: form.value.pan.trim().toUpperCase() || null,
+    taxRegime: form.value.taxRegime === 'old' ? 'old' : 'new',
+    isProvidentFundMember: form.value.isProvidentFundMember,
+    isStateInsuranceMember: form.value.isStateInsuranceMember,
+    isPersonWithDisability: form.value.isPersonWithDisability,
+    professionalTaxJurisdiction: form.value.professionalTaxJurisdiction.trim() || null,
+    bankName: form.value.bankName.trim() || null,
+    bankAccountNumber: form.value.bankAccountNumber.trim() || null,
+    bankIfsc: form.value.bankIfsc.trim().toUpperCase() || null,
   }
-  sessionEmployees.value = [...sessionEmployees.value, employee]
-  modalOpen.value = false
-  toast.success(
-    'Employee added to this session',
-    `${employee.name} (${employee.code}) is held in this screen only. Nothing was written to the repository.`,
-  )
+
+  saving.value = true
+  try {
+    await session.repository.saveEmployee(employee)
+    await session.loadMasters(companyId)
+    modalOpen.value = false
+    toast.success(
+      existing ? 'Employee saved' : 'Employee added',
+      `${employee.name} (${employee.code}) is now part of the employee master.`,
+    )
+  } catch (cause) {
+    toast.error(
+      'The employee was not saved',
+      cause instanceof Error ? cause.message : 'The repository did not say why.',
+    )
+  } finally {
+    saving.value = false
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -225,7 +344,6 @@ onMounted(async () => {
 watch(
   () => session.activeCompanyId,
   () => {
-    sessionEmployees.value = []
     page.value = 1
   },
 )
@@ -244,7 +362,7 @@ watch([search, department, pageSize], () => {
       :breadcrumb="[{ label: 'Payroll' }, { label: 'Employees' }]"
     >
       <template #actions>
-        <BaseButton size="sm" variant="primary" icon="person_add" @click="openModal">
+        <BaseButton size="sm" variant="primary" icon="person_add" @click="openCreate">
           Add employee
         </BaseButton>
       </template>
@@ -282,29 +400,12 @@ watch([search, department, pageSize], () => {
       </div>
 
       <template v-else>
-        <div class="rounded-sm border-l-4 border-l-tertiary bg-surface-container-low p-space-md">
-          <div class="flex items-start gap-space-sm">
-            <MaterialIcon name="info" :size="18" class="mt-0.5 shrink-0 text-tertiary" />
-            <div class="min-w-0">
-              <p class="text-label-md font-bold text-on-surface">
-                Employees added here are held in this session only.
-              </p>
-              <p class="mt-0.5 text-body-sm text-on-surface-variant">
-                The repository has no method to save an employee, so a new record is kept in this
-                screen and nothing is written to the books. It is marked “Session only” in the
-                table and is lost when the application closes. The master rows come from the
-                repository.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <div class="mt-space-md grid grid-cols-1 gap-space-md sm:grid-cols-2 lg:grid-cols-4">
+        <div class="grid grid-cols-1 gap-space-md sm:grid-cols-2 lg:grid-cols-4">
           <StatTile
             label="Employees"
             :value="String(employees.length)"
             icon="groups"
-            :hint="`${sessionEmployees.length} added in this session`"
+            hint="Held in the employee master"
           />
           <StatTile
             label="Active employees"
@@ -314,10 +415,10 @@ watch([search, department, pageSize], () => {
             hint="Marked active in the master"
           />
           <StatTile
-            label="Departments"
-            :value="String(departments.length)"
-            icon="domain"
-            hint="Distinct departments in the master"
+            label="Provident fund members"
+            :value="String(activeEmployees.filter((employee) => employee.isProvidentFundMember).length)"
+            icon="savings"
+            hint="Contribute to the provident fund"
           />
           <StatTile
             label="Monthly gross (active employees)"
@@ -345,10 +446,37 @@ watch([search, department, pageSize], () => {
               <span class="num font-semibold text-on-surface">{{ row.code }}</span>
             </template>
             <template #cell:name="{ row }">
-              <span class="text-on-surface">{{ row.name }}</span>
+              <div class="min-w-0">
+                <p class="truncate text-on-surface">{{ row.name }}</p>
+                <p class="truncate text-label-xs text-outline">{{ row.costCentre }}</p>
+              </div>
             </template>
-            <template #cell:dateOfJoining="{ row }">
-              <span class="num text-on-surface-variant">{{ formatDate(row.dateOfJoining) }}</span>
+            <template #cell:contributions="{ row }">
+              <div class="flex flex-wrap items-center gap-1">
+                <BaseBadge
+                  v-if="row.providentFund"
+                  tone="info"
+                  size="xs"
+                  icon="savings"
+                >
+                  PF
+                </BaseBadge>
+                <BaseBadge
+                  v-if="row.stateInsurance"
+                  tone="info"
+                  size="xs"
+                  icon="health_and_safety"
+                >
+                  ESI
+                </BaseBadge>
+                <span class="text-label-xs text-outline">{{ row.taxRegime }}</span>
+              </div>
+            </template>
+            <template #cell:pan="{ row }">
+              <span class="num text-on-surface-variant">{{ row.pan || 'Not recorded' }}</span>
+            </template>
+            <template #cell:bankAccount="{ row }">
+              <span class="num text-on-surface-variant">{{ row.bankAccount || 'Not recorded' }}</span>
             </template>
             <template #cell:monthlyGross="{ row }">
               <span class="num text-on-surface">{{ formatMoney(row.monthlyGross, currency) }}</span>
@@ -362,14 +490,15 @@ watch([search, department, pageSize], () => {
                 {{ row.isActive ? 'Active' : 'Inactive' }}
               </BaseBadge>
             </template>
-            <template #cell:source="{ row }">
-              <BaseBadge
-                :tone="row.source === 'session' ? 'warning' : 'neutral'"
+            <template #cell:actions="{ row }">
+              <BaseButton
                 size="xs"
-                :icon="row.source === 'session' ? 'schedule' : 'database'"
+                variant="text"
+                icon="edit"
+                @click="openEdit(employees.find((employee) => employee.id === row.id)!)"
               >
-                {{ row.source === 'session' ? 'Session only' : 'Master' }}
-              </BaseBadge>
+                Edit
+              </BaseButton>
             </template>
           </DataTable>
 
@@ -388,41 +517,23 @@ watch([search, department, pageSize], () => {
           title="No employee matches"
           description="Adjust the search text or the department filter."
         >
-          <BaseButton size="sm" variant="outlined" icon="person_add" @click="openModal">
+          <BaseButton size="sm" variant="outlined" icon="person_add" @click="openCreate">
             Add employee
           </BaseButton>
         </BaseEmptyState>
 
-        <div class="mt-space-md grid grid-cols-1 gap-space-md lg:grid-cols-2">
-          <div class="rounded-sm border-l-4 border-l-tertiary bg-surface-container-low p-space-md">
-            <div class="flex items-start gap-space-sm">
-              <MaterialIcon name="percent" :size="18" class="mt-0.5 shrink-0 text-tertiary" />
-              <div class="min-w-0">
-                <p class="text-label-md font-bold text-on-surface">
-                  Statutory payroll contributions are not implemented
-                </p>
-                <p class="mt-0.5 text-body-sm text-on-surface-variant">
-                  Provident fund, ESI, professional tax and TDS on salary are not computed anywhere
-                  in this build, and no statutory rate, wage ceiling or contribution threshold is
-                  assumed. The monthly gross shown above is the figure stored on the master record
-                  and nothing more.
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div class="rounded-sm border-l-4 border-l-tertiary bg-surface-container-low p-space-md">
-            <div class="flex items-start gap-space-sm">
-              <MaterialIcon name="database" :size="18" class="mt-0.5 shrink-0 text-tertiary" />
-              <div class="min-w-0">
-                <p class="text-label-md font-bold text-on-surface">Where these records live</p>
-                <p class="mt-0.5 text-body-sm text-on-surface-variant">
-                  Rows marked “Master” are read from the repository with the rest of the company
-                  masters. Rows marked “Session only” were added on this screen and exist in
-                  memory only — they are not in the repository, will not appear in reports, and
-                  cannot be relied on after a restart.
-                </p>
-              </div>
+        <div class="mt-space-md rounded-sm border-l-4 border-l-primary bg-surface-container-low p-space-md">
+          <div class="flex items-start gap-space-sm">
+            <MaterialIcon name="lock" :size="18" class="mt-0.5 shrink-0 text-primary" />
+            <div class="min-w-0">
+              <p class="text-label-md font-bold text-on-surface">
+                The tax number and the account number are held, never shown
+              </p>
+              <p class="mt-0.5 text-body-sm text-on-surface-variant">
+                A system that puts a full account number or a tax number on a screen has made it a
+                copy that can be left behind. Both are masked here, and they are masked everywhere
+                else in the payroll too.
+              </p>
             </div>
           </div>
         </div>
@@ -431,9 +542,9 @@ watch([search, department, pageSize], () => {
 
     <BaseModal
       :open="modalOpen"
-      title="Add employee"
-      description="Held in this session only — the repository has no employee save method"
-      size="md"
+      :title="editingId ? 'Edit employee' : 'Add employee'"
+      description="The employee master this company keeps"
+      size="lg"
       @close="closeModal"
     >
       <div class="space-y-space-md">
@@ -482,17 +593,88 @@ watch([search, department, pageSize], () => {
           />
         </div>
 
-        <div class="rounded-sm border-l-4 border-l-tertiary bg-surface-container-low p-space-sm">
-          <p class="text-label-sm text-on-surface-variant">
-            Saving adds this employee to the list on this screen only. Nothing is written to the
-            repository and the record is lost when the application closes.
-          </p>
+        <div class="rounded-sm bg-surface-container-low p-space-sm">
+          <p class="section-label mb-space-sm">Payroll</p>
+          <div class="grid grid-cols-1 gap-space-md sm:grid-cols-2">
+            <BaseSelect
+              v-model="form.costCentreId"
+              label="Cost centre"
+              :options="costCentreOptions"
+            />
+            <BaseSelect
+              v-model="form.taxRegime"
+              label="Tax regime"
+              :options="taxRegimeOptions"
+            />
+          </div>
+          <div class="mt-space-md grid grid-cols-1 gap-space-md sm:grid-cols-2">
+            <BaseInput
+              v-model="form.pan"
+              label="Tax number"
+              :error="errors.pan"
+              placeholder="ABCDE1234F"
+              hint="Shown masked on every screen"
+            />
+            <BaseInput
+              v-model="form.professionalTaxJurisdiction"
+              label="Professional tax jurisdiction"
+              placeholder="Leave empty when it does not apply"
+              hint="The jurisdiction the professional tax schedule applies in"
+            />
+          </div>
+          <div class="mt-space-md space-y-space-sm">
+            <BaseSwitch
+              v-model="form.isProvidentFundMember"
+              label="Contributes to the provident fund"
+              description="The employee and the employer both contribute on the provident fund wages."
+            />
+            <BaseSwitch
+              v-model="form.isStateInsuranceMember"
+              label="Contributes to the state insurance"
+              description="Only the employees whose wages are within the state insurance ceiling."
+            />
+            <BaseSwitch
+              v-model="form.isPersonWithDisability"
+              label="Person with a disability"
+              description="The state insurance wage ceiling is higher for such an employee."
+            />
+          </div>
+        </div>
+
+        <div class="rounded-sm bg-surface-container-low p-space-sm">
+          <p class="section-label mb-space-sm">Bank details</p>
+          <div class="grid grid-cols-1 gap-space-md sm:grid-cols-2">
+            <BaseInput v-model="form.bankName" label="Bank" placeholder="HDFC Bank" />
+            <BaseInput
+              v-model="form.bankIfsc"
+              label="Branch identifier"
+              :error="errors.bankIfsc"
+              placeholder="HDFC0001234"
+              hint="Shown masked on every screen"
+            />
+          </div>
+          <div class="mt-space-md grid grid-cols-1 gap-space-md sm:grid-cols-2">
+            <BaseInput
+              v-model="form.bankAccountNumber"
+              label="Account number"
+              :error="errors.bankAccountNumber"
+              placeholder="50100234567890"
+              hint="Shown masked on every screen"
+            />
+          </div>
         </div>
       </div>
 
       <template #footer>
         <BaseButton variant="text" @click="closeModal">Cancel</BaseButton>
-        <BaseButton variant="primary" icon="person_add" @click="save">Add employee</BaseButton>
+        <BaseButton
+          variant="primary"
+          icon="save"
+          :loading="saving"
+          @click="save"
+        >
+          {{ editingId ? 'Save employee' : 'Add employee' }}
+        </BaseButton>
       </template>
     </BaseModal>
   </div>
