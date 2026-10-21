@@ -11,6 +11,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  hygiene:
+    name: Publication hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A public repository has to be safe to publish, and stay that way. This
+      # catches the regressions that no test notices: a weakened .gitignore, an
+      # import that is not a declared dependency, a sensitive file in the
+      # tree, and a README that disagrees with package.json about Node.
+      - name: Check publication hygiene
+        run: node scripts/check-publication-hygiene.mjs
+
   frontend:
     name: Type-check, lint, test and build
     runs-on: ${{ matrix.os }}
