@@ -43,7 +43,7 @@ jobs:
 
   rust:
     name: Rust persistence tests
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -52,14 +52,22 @@ jobs:
           node-version: '22'
           cache: npm
 
-      # The Tauri crate links the WebView2 loader, so the SDK has to be
-      # present before cargo runs. The runtime alone is not enough.
-      - name: Install the WebView2 SDK
-        shell: pwsh
+      - name: Install dependencies
+        run: npm ci
+
+      # The Tauri crate links the system webview, so these have to be present
+      # before cargo runs.
+      - name: Install the system libraries Tauri links against
         run: |
-          git clone --depth 1 https://github.com/wv2ware/wv2-devenv-ps-module.git
-          Install-Product -Path "$PWD/wv2-devenv-ps-module"
-          Write-Host "::add-path::$env:WEBVIEW2_DEPS"
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            build-essential
 
       - uses: dtolnay/rust-toolchain@stable
         with:
