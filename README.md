@@ -16,6 +16,11 @@ sample workspace when it runs in a browser. The sample books are produced
 through the same domain service the interface uses, so they are held to the
 same rules as real ones.
 
+> **Licence.** This repository is published for inspection. No licence has been
+> chosen yet, so no general permission to use, copy or redistribute it has been
+> granted. The options under consideration and the reasoning are in
+> [docs/licensing-decision.md](docs/licensing-decision.md).
+
 ---
 
 ## Running it
