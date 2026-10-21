@@ -1,0 +1,16 @@
+# Normalise text to LF in the repository so the tree is identical on every
+# platform, and keep the binary assets out of the text handling.
+* text=auto
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.pdf binary
+*.sqlite3 binary
+*.db binary

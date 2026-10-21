@@ -1,0 +1,62 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Build output
+dist
+dist-ssr
+coverage
+*.tsbuildinfo
+
+# Local artefacts produced by the visual and desktop checks
+artifacts
+
+# Tauri generated code and build output
+src-tauri/target
+src-tauri/gen/schemas
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Local databases and backups. The application keeps its books in the
+# operating system's per-application data directory, so a database in the
+# working tree is always a leftover, never a fixture.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.bak
+*.backup
+
+# Keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Local notes that are not part of the published project
+# Competitive research kept for the author only.
+deep-research-report.md
+# One-shot source patch scripts. Their changes are already in the tree, so
+# re-running them does nothing; they are kept locally as a record.
+scripts/patch-grid.mjs
+scripts/patch-planner.mjs
+# The Rust tests live in src-tauri/tests/. A stray .rs file here is a mistake.
+tests/*.rs
+
+# Editors and operating systems
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# Logs
+*.log
+npm-debug.log*

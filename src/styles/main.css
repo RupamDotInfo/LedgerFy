@@ -1,0 +1,365 @@
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+@import '@fontsource/material-symbols-outlined/latin-400.css';
+@import '@fontsource/material-symbols-outlined/latin-700.css';
+@import 'tailwindcss';
+
+/* ==========================================================================
+   LedgerFy design tokens — Material 3 derived
+   Light-first, high-density desktop accounting surface.
+   ========================================================================== */
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'Cascadia Mono', ui-monospace, 'SFMono-Regular', Consolas, monospace;
+
+  --font-label-xs: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-label-sm: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-label-md: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-body-sm: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-body-md: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-body-lg: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-numeric-sm: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-numeric-md: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-numeric-lg: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-headline-sm: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-headline-md: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-headline-lg: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-headline-xl: 'Inter', ui-sans-serif, system-ui, sans-serif;
+
+  /* --- Type scale --- */
+  --text-label-xs: 0.6875rem;
+  --text-label-xs--line-height: 0.75rem;
+  --text-label-xs--letter-spacing: 0.04em;
+  --text-label-xs--font-weight: 700;
+
+  --text-label-sm: 0.75rem;
+  --text-label-sm--line-height: 0.875rem;
+  --text-label-sm--letter-spacing: 0.02em;
+  --text-label-sm--font-weight: 600;
+
+  --text-label-md: 0.8125rem;
+  --text-label-md--line-height: 1rem;
+  --text-label-md--letter-spacing: 0.01em;
+  --text-label-md--font-weight: 600;
+
+  --text-body-sm: 0.8125rem;
+  --text-body-sm--line-height: 1.125rem;
+  --text-body-sm--font-weight: 400;
+
+  --text-body-md: 0.875rem;
+  --text-body-md--line-height: 1.25rem;
+  --text-body-md--font-weight: 400;
+
+  --text-body-lg: 0.9375rem;
+  --text-body-lg--line-height: 1.375rem;
+  --text-body-lg--font-weight: 400;
+
+  --text-numeric-sm: 0.8125rem;
+  --text-numeric-sm--line-height: 1.125rem;
+  --text-numeric-sm--font-weight: 500;
+
+  --text-numeric-md: 0.875rem;
+  --text-numeric-md--line-height: 1.25rem;
+  --text-numeric-md--font-weight: 500;
+
+  --text-numeric-lg: 1.25rem;
+  --text-numeric-lg--line-height: 1.5rem;
+  --text-numeric-lg--font-weight: 600;
+
+  --text-headline-sm: 1.125rem;
+  --text-headline-sm--line-height: 1.5rem;
+  --text-headline-sm--letter-spacing: -0.005em;
+  --text-headline-sm--font-weight: 600;
+
+  --text-headline-md: 1.25rem;
+  --text-headline-md--line-height: 1.75rem;
+  --text-headline-md--letter-spacing: -0.01em;
+  --text-headline-md--font-weight: 600;
+
+  --text-headline-lg: 1.5rem;
+  --text-headline-lg--line-height: 2rem;
+  --text-headline-lg--letter-spacing: -0.015em;
+  --text-headline-lg--font-weight: 600;
+
+  --text-headline-xl: 2rem;
+  --text-headline-xl--line-height: 2.5rem;
+  --text-headline-xl--letter-spacing: -0.02em;
+  --text-headline-xl--font-weight: 700;
+
+  /* --- Brand --- */
+  --color-primary: #2248d1;
+  --color-on-primary: #ffffff;
+  --color-primary-container: #4263eb;
+  --color-on-primary-container: #f5f3ff;
+  --color-primary-fixed: #dde1ff;
+  --color-primary-fixed-dim: #b9c3ff;
+  --color-on-primary-fixed: #001356;
+  --color-on-primary-fixed-variant: #0035be;
+
+  /* --- Secondary --- */
+  --color-secondary: #006c47;
+  --color-on-secondary: #ffffff;
+  --color-secondary-container: #90f4c0;
+  --color-on-secondary-container: #00714b;
+  --color-secondary-fixed: #93f6c3;
+  --color-secondary-fixed-dim: #77daa8;
+  --color-on-secondary-fixed: #002113;
+  --color-on-secondary-fixed-variant: #005235;
+
+  /* --- Tertiary --- */
+  --color-tertiary: #a52536;
+  --color-on-tertiary: #ffffff;
+  --color-tertiary-container: #c63f4d;
+  --color-on-tertiary-container: #fff2f1;
+  --color-tertiary-fixed: #ffdada;
+  --color-tertiary-fixed-dim: #ffb3b4;
+  --color-on-tertiary-fixed: #40000b;
+  --color-on-tertiary-fixed-variant: #8d1128;
+
+  /* --- Error --- */
+  --color-error: #ba1a1a;
+  --color-on-error: #ffffff;
+  --color-error-container: #ffdad6;
+  --color-on-error-container: #93000a;
+
+  /* --- Surfaces --- */
+  --color-surface: #f9f9ff;
+  --color-surface-bright: #f9f9ff;
+  --color-surface-dim: #d1daf4;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f1f3ff;
+  --color-surface-container: #e9edff;
+  --color-surface-container-high: #e1e8ff;
+  --color-surface-container-highest: #d9e2fc;
+  --color-surface-variant: #d9e2fc;
+  --color-surface-tint: #2c50d9;
+
+  /* --- Content --- */
+  --color-on-surface: #121b2e;
+  --color-on-surface-variant: #444654;
+  --color-outline: #747686;
+  --color-outline-variant: #c4c5d7;
+  --color-background: #f9f9ff;
+  --color-on-background: #121b2e;
+  --color-inverse-surface: #273044;
+  --color-inverse-on-surface: #edf0ff;
+  --color-inverse-primary: #b9c3ff;
+
+  /* --- Radii --- */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* --- Spacing --- */
+  --spacing-space-xs: 0.25rem;
+  --spacing-space-sm: 0.5rem;
+  --spacing-space-md: 0.75rem;
+  --spacing-space-lg: 1rem;
+  --spacing-space-xl: 1.5rem;
+  --spacing-gutter: 0.75rem;
+  --spacing-gutter-compact: 0.5rem;
+  --spacing-gutter-spacious: 1rem;
+  --spacing-margin-dock: 0.5rem;
+  --spacing-margin: 1rem;
+
+  /* --- Elevation --- */
+  --shadow-xs: 0 1px 2px rgb(18 27 46 / 0.06);
+  --shadow-sm: 0 1px 2px rgb(18 27 46 / 0.08), 0 1px 3px 1px rgb(18 27 46 / 0.05);
+  --shadow-md: 0 1px 3px rgb(18 27 46 / 0.1), 0 4px 8px -2px rgb(18 27 46 / 0.08);
+  --shadow-lg: 0 4px 8px -2px rgb(18 27 46 / 0.12), 0 12px 24px -4px rgb(18 27 46 / 0.14);
+  --shadow-xl: 0 8px 16px -4px rgb(18 27 46 / 0.16), 0 20px 40px -8px rgb(18 27 46 / 0.18);
+}
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+
+@layer base {
+  html,
+  body,
+  #app {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-surface);
+    color: var(--color-on-surface);
+    font-family: var(--font-sans);
+    font-size: var(--text-body-md);
+    line-height: var(--text-body-md--line-height);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+
+  .tabular,
+  .num,
+  input[type='number'] {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    margin: 0;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--color-on-surface);
+  }
+
+  button {
+    font-family: inherit;
+  }
+
+  input,
+  select,
+  textarea {
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+  }
+
+  ::selection {
+    background-color: color-mix(in srgb, var(--color-primary) 22%, transparent);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-outline-variant) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--color-surface-container-highest);
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 999px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-outline-variant);
+  }
+}
+
+/* ==========================================================================
+   Material Symbols
+   ========================================================================== */
+
+@layer components {
+  .material-symbols-outlined {
+    font-family: 'Material Symbols Outlined';
+    font-weight: 400;
+    font-style: normal;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    display: inline-block;
+    white-space: nowrap;
+    word-wrap: normal;
+    direction: ltr;
+    font-feature-settings: 'liga';
+    -webkit-font-feature-settings: 'liga';
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+}
+
+/* ==========================================================================
+   Shared utilities
+   ========================================================================== */
+
+@layer components {
+  /* M3 elevation card used across the app. */
+  .surface-card {
+    background-color: var(--color-surface-container-lowest);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .surface-inset {
+    background-color: var(--color-surface-container-low);
+    border-radius: var(--radius-sm);
+  }
+
+  .section-label {
+    font-size: var(--text-label-xs);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-outline);
+  }
+
+  /* Keyboard shortcut cap, e.g. F8 / Ctrl+K */
+  .kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: var(--radius-xs);
+    background-color: var(--color-surface-container);
+    color: var(--color-outline);
+    font-family: var(--font-label-xs);
+    font-size: var(--text-label-xs);
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  .skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    z-index: 100;
+  }
+
+  .skip-link:focus {
+    left: 8px;
+    top: 8px;
+    padding: 8px 12px;
+    background: var(--color-surface-container-lowest);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-md);
+  }
+}
+
+/* ==========================================================================
+   Print: document preview / printable documents
+   ========================================================================== */
+
+@media print {
+  body {
+    overflow: visible;
+    background: #fff;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-surface {
+    box-shadow: none !important;
+  }
+}
