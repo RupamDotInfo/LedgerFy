@@ -18,6 +18,7 @@
     "format:check": "prettier --check \"src/**/*.{ts,vue,css}\" \"tests/**/*.{ts,vue}\"",
     "test": "vitest run",
     "test:watch": "vitest",
+    "check:hygiene": "node scripts/check-publication-hygiene.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
