@@ -687,6 +687,105 @@ describe('the attendance figures', () => {
 })
 
 // ---------------------------------------------------------------------------
+// The salary tax
+// ---------------------------------------------------------------------------
+
+describe('the salary tax', () => {
+  const tdsOf = (calculation: ReturnType<typeof calculatePayroll>['calculation']): number =>
+    calculation.statutoryDeductions.find((entry) => entry.code === 'TDS')?.amount ?? 0
+
+  /*
+   * A pay and a projection that are consistent with each other, and high
+   * enough to be taxed. The sample projection of 7.2 lakh is below the 87A
+   * rebate threshold, so no tax is due and every figure below would be zero -
+   * and a projection above the monthly earnings would make the run refuse to
+   * calculate, because the deduction would exceed the earnings.
+   */
+  const paid = rupees(2_00_000)
+  const paidComponents: SalaryComponent[] = [
+    component('BASIC', 'Basic salary', paid, ALL_BASES, 1),
+  ]
+  const paidInput = (overrides: Partial<PayrollCalculationInput> = {}) =>
+    input({
+      components: paidComponents,
+      projectedAnnualGross: paid * 12,
+      ...overrides,
+    })
+
+  it('respects the regime the employee has chosen', () => {
+    const inTheNewRegime = calculatePayroll(
+      paidInput({ employee: employee({ taxRegime: 'new' }) }),
+    ).calculation
+    const inTheOldRegime = calculatePayroll(
+      paidInput({ employee: employee({ taxRegime: 'old' }) }),
+    ).calculation
+
+    expect(tdsOf(inTheNewRegime)).toBeGreaterThan(0)
+    expect(tdsOf(inTheOldRegime)).toBeGreaterThan(0)
+    // The two regimes do not scale the same income the same way.
+    expect(tdsOf(inTheOldRegime)).not.toBe(tdsOf(inTheNewRegime))
+  })
+
+  it('takes the declared deductions off the taxable income', () => {
+    const without = calculatePayroll(paidInput({ declaredDeductions: 0 })).calculation
+    const withClaims = calculatePayroll(
+      paidInput({ declaredDeductions: rupees(2_00_000) }),
+    ).calculation
+
+    expect(tdsOf(withClaims)).toBeGreaterThan(0)
+    expect(tdsOf(withClaims)).toBeLessThan(tdsOf(without))
+  })
+
+  it('computes the tax from the projection, the standard deduction and the claims', () => {
+    // The employee's own deductions are the recovery and the employee's own
+    // statutory contributions; the recovery is one of them, and none of them
+    // reduces the tax, only the net pay.
+    const calculation = calculatePayroll(
+      paidInput({
+        attendance: {
+          id: 'att-1',
+          companyId: 'cmp-1',
+          employeeId: 'emp-1',
+          period: '2026-04',
+          payableDays: 30,
+          lopDays: 0,
+          extraDays: 0,
+          otherDeductions: rupees(10_000),
+          note: '',
+          createdAt: '2026-04-30T00:00:00.000Z',
+          updatedAt: '2026-04-30T00:00:00.000Z',
+        },
+      }),
+    ).calculation
+
+    expect(calculation.employeeDeductionTotal).toBeGreaterThanOrEqual(rupees(10_000))
+    expect(calculation.netPay).toBe(
+      calculation.grossEarnings -
+        calculation.employeeDeductionTotal -
+        calculation.statutoryDeductionTotal,
+    )
+  })
+
+  it('leaves the gross, the deductions and the net consistent with each other', () => {
+    const calculation = calculatePayroll(input()).calculation
+
+    expect(calculation.grossEarnings).toBe(
+      calculation.components
+        .filter((entry) => entry.kind === 'earning' || entry.kind === 'reimbursement')
+        .reduce((sum, entry) => sum + entry.amount, 0),
+    )
+    expect(calculation.statutoryDeductionTotal).toBe(
+      calculation.statutoryDeductions.reduce((sum, entry) => sum + entry.amount, 0),
+    )
+    expect(calculation.netPay).toBe(
+      calculation.grossEarnings -
+        calculation.employeeDeductionTotal -
+        calculation.statutoryDeductionTotal,
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
 // The proration
 // ---------------------------------------------------------------------------
 
