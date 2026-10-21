@@ -748,7 +748,11 @@ pub fn list_cost_centres_cmd(
 pub fn list_employees(database: &Database, company_id: &str) -> Result<Vec<Employee>, String> {
     let connection = database.lock();
     let mut statement = connection
-        .prepare("SELECT id, company_id, name, code, department, designation, date_of_joining, monthly_gross, is_active
+        .prepare("SELECT id, company_id, name, code, department, designation, date_of_joining,
+                    monthly_gross, is_active, cost_centre_id, pan, tax_regime,
+                    is_provident_fund_member, is_state_insurance_member,
+                    is_person_with_disability, professional_tax_jurisdiction,
+                    bank_name, bank_account_number, bank_ifsc
              FROM employees WHERE company_id = ?1 ORDER BY name")
         .map_err(|error| db_error("The employees could not be read", error))?;
     let rows = statement
@@ -763,6 +767,16 @@ pub fn list_employees(database: &Database, company_id: &str) -> Result<Vec<Emplo
                 date_of_joining: row.get(6)?,
                 monthly_gross: row.get(7)?,
                 is_active: bool_from_int(row.get(8)?),
+                cost_centre_id: row.get(9)?,
+                pan: row.get(10)?,
+                tax_regime: row.get(11)?,
+                is_provident_fund_member: bool_from_int(row.get(12)?),
+                is_state_insurance_member: bool_from_int(row.get(13)?),
+                is_person_with_disability: bool_from_int(row.get(14)?),
+                professional_tax_jurisdiction: row.get(15)?,
+                bank_name: row.get(16)?,
+                bank_account_number: row.get(17)?,
+                bank_ifsc: row.get(18)?,
             })
         })
         .map_err(|error| db_error("The employees could not be read", error))?;
@@ -1000,40 +1014,73 @@ pub fn save_cost_centre_cmd(
     })
 }
 
+/// Save an employee.
+///
+/// The payroll needs the employee's tax number, the schemes they contribute
+/// to and the bank the salary is paid to, so they are saved with the rest of
+/// the record.
+pub fn save_employee(
+    database: &Database,
+    employee: Employee,
+) -> Result<Employee, String> {
+    check_money(employee.monthly_gross, "Monthly gross")?;
+    database.transaction(|transaction| {
+        ensure_company(transaction, &employee.company_id)?;
+        transaction
+            .execute(
+                "INSERT INTO employees (id, company_id, name, code, department, designation,
+                    date_of_joining, monthly_gross, is_active, cost_centre_id, pan, tax_regime,
+                    is_provident_fund_member, is_state_insurance_member,
+                    is_person_with_disability, professional_tax_jurisdiction,
+                    bank_name, bank_account_number, bank_ifsc)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                    ?17, ?18, ?19)
+                 ON CONFLICT(id) DO UPDATE SET name = excluded.name, code = excluded.code,
+                    department = excluded.department, designation = excluded.designation,
+                    date_of_joining = excluded.date_of_joining,
+                    monthly_gross = excluded.monthly_gross, is_active = excluded.is_active,
+                    cost_centre_id = excluded.cost_centre_id, pan = excluded.pan,
+                    tax_regime = excluded.tax_regime,
+                    is_provident_fund_member = excluded.is_provident_fund_member,
+                    is_state_insurance_member = excluded.is_state_insurance_member,
+                    is_person_with_disability = excluded.is_person_with_disability,
+                    professional_tax_jurisdiction = excluded.professional_tax_jurisdiction,
+                    bank_name = excluded.bank_name,
+                    bank_account_number = excluded.bank_account_number,
+                    bank_ifsc = excluded.bank_ifsc",
+                params![
+                    employee.id,
+                    employee.company_id,
+                    employee.name,
+                    employee.code,
+                    employee.department,
+                    employee.designation,
+                    employee.date_of_joining,
+                    employee.monthly_gross,
+                    int_from_bool(employee.is_active),
+                    employee.cost_centre_id,
+                    employee.pan,
+                    employee.tax_regime,
+                    int_from_bool(employee.is_provident_fund_member),
+                    int_from_bool(employee.is_state_insurance_member),
+                    int_from_bool(employee.is_person_with_disability),
+                    employee.professional_tax_jurisdiction,
+                    employee.bank_name,
+                    employee.bank_account_number,
+                    employee.bank_ifsc,
+                ],
+            )
+            .map_err(|error| db_error("The employee could not be saved", error))?;
+        Ok(employee)
+    })
+}
+
 #[tauri::command]
 pub fn save_employee_cmd(
     workspace: State<'_, Workspace>,
     employee: Employee,
 ) -> Result<Employee, String> {
-    workspace.with_database(|db| {
-        check_money(employee.monthly_gross, "Monthly gross")?;
-        db.transaction(|transaction| {
-            ensure_company(transaction, &employee.company_id)?;
-            transaction
-                .execute(
-                    "INSERT INTO employees (id, company_id, name, code, department, designation,
-                        date_of_joining, monthly_gross, is_active)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                     ON CONFLICT(id) DO UPDATE SET name = excluded.name, code = excluded.code,
-                        department = excluded.department, designation = excluded.designation,
-                        date_of_joining = excluded.date_of_joining,
-                        monthly_gross = excluded.monthly_gross, is_active = excluded.is_active",
-                    params![
-                        employee.id,
-                        employee.company_id,
-                        employee.name,
-                        employee.code,
-                        employee.department,
-                        employee.designation,
-                        employee.date_of_joining,
-                        employee.monthly_gross,
-                        int_from_bool(employee.is_active)
-                    ],
-                )
-                .map_err(|error| db_error("The employee could not be saved", error))?;
-            Ok(employee)
-        })
-    })
+    workspace.with_database(|db| save_employee(db, employee))
 }
 
 #[tauri::command]
@@ -2132,6 +2179,14 @@ pub fn seed_workspace(
     production_issues: Vec<ProductionIssue>,
     production_completions: Vec<ProductionCompletion>,
     inventory_accounts: Vec<InventoryAccounts>,
+    salary_structures: Vec<SalaryStructure>,
+    salary_components: Vec<SalaryComponent>,
+    salary_assignments: Vec<SalaryAssignment>,
+    payroll_attendance: Vec<PayrollAttendance>,
+    payroll_runs: Vec<PayrollRun>,
+    payroll_snapshots: Vec<PayrollSnapshot>,
+    payroll_accounts: Vec<PayrollAccounts>,
+    statutory_rule_versions: Vec<StatutoryRuleVersion>,
     statement_lines: Vec<StatementLine>,
     audit_events: Vec<AuditEvent>,
 ) -> Result<(), String> {
@@ -2193,8 +2248,12 @@ pub fn seed_workspace(
             transaction
                 .execute(
                     "INSERT INTO employees (id, company_id, name, code, department, designation,
-                        date_of_joining, monthly_gross, is_active)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        date_of_joining, monthly_gross, is_active, cost_centre_id, pan, tax_regime,
+                        is_provident_fund_member, is_state_insurance_member,
+                        is_person_with_disability, professional_tax_jurisdiction,
+                        bank_name, bank_account_number, bank_ifsc)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                        ?17, ?18, ?19)",
                     params![
                         employee.id,
                         employee.company_id,
@@ -2204,7 +2263,17 @@ pub fn seed_workspace(
                         employee.designation,
                         employee.date_of_joining,
                         employee.monthly_gross,
-                        int_from_bool(employee.is_active)
+                        int_from_bool(employee.is_active),
+                        employee.cost_centre_id,
+                        employee.pan,
+                        employee.tax_regime,
+                        int_from_bool(employee.is_provident_fund_member),
+                        int_from_bool(employee.is_state_insurance_member),
+                        int_from_bool(employee.is_person_with_disability),
+                        employee.professional_tax_jurisdiction,
+                        employee.bank_name,
+                        employee.bank_account_number,
+                        employee.bank_ifsc,
                     ],
                 )
                 .map_err(|error| db_error("An employee could not be written", error))?;
@@ -2468,6 +2537,190 @@ pub fn seed_workspace(
                     ],
                 )
                 .map_err(|error| db_error("A production issue could not be written", error))?;
+        }
+        for structure in &salary_structures {
+            transaction
+                .execute(
+                    "INSERT INTO salary_structures (id, company_id, name, version, effective_from,
+                        effective_to, is_active, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        structure.id,
+                        structure.company_id,
+                        structure.name,
+                        structure.version,
+                        structure.effective_from,
+                        structure.effective_to,
+                        int_from_bool(structure.is_active),
+                        structure.created_at,
+                        structure.updated_at,
+                    ],
+                )
+                .map_err(|error| db_error("A salary structure could not be written", error))?;
+        }
+        // A component is created with the structure it belongs to.
+        let structure_times: std::collections::HashMap<&str, &str> = salary_structures
+            .iter()
+            .map(|structure| (structure.id.as_str(), structure.created_at.as_str()))
+            .collect();
+        for component in &salary_components {
+            let created_at = structure_times
+                .get(component.structure_id.as_str())
+                .copied()
+                .unwrap_or("2026-01-01T00:00:00.000Z");
+            transaction
+                .execute(
+                    "INSERT INTO salary_structure_components (id, company_id, structure_id, code, name,
+                        kind, calculation, bases, position, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        component.id,
+                        component.company_id,
+                        component.structure_id,
+                        component.code,
+                        component.name,
+                        component.kind,
+                        component.calculation.to_string(),
+                        component.bases.to_string(),
+                        component.position,
+                        created_at,
+                    ],
+                )
+                .map_err(|error| db_error("A salary structure component could not be written", error))?;
+        }
+        for assignment in &salary_assignments {
+            transaction
+                .execute(
+                    "INSERT INTO salary_assignments (id, company_id, employee_id, structure_id,
+                        effective_from, effective_to, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        assignment.id,
+                        assignment.company_id,
+                        assignment.employee_id,
+                        assignment.structure_id,
+                        assignment.effective_from,
+                        assignment.effective_to,
+                        assignment.created_at,
+                    ],
+                )
+                .map_err(|error| db_error("A salary assignment could not be written", error))?;
+        }
+        for attendance in &payroll_attendance {
+            transaction
+                .execute(
+                    "INSERT INTO payroll_attendance (id, company_id, employee_id, period, payable_days,
+                        lop_days, extra_days, other_deductions, note, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![
+                        attendance.id,
+                        attendance.company_id,
+                        attendance.employee_id,
+                        attendance.period,
+                        attendance.payable_days,
+                        attendance.lop_days,
+                        attendance.extra_days,
+                        attendance.other_deductions,
+                        attendance.note,
+                        attendance.created_at,
+                        attendance.updated_at,
+                    ],
+                )
+                .map_err(|error| db_error("An attendance record could not be written", error))?;
+        }
+        for run in &payroll_runs {
+            transaction
+                .execute(
+                    "INSERT INTO payroll_runs (id, company_id, number, period, period_start, period_end,
+                        payment_date, status, employee_count, gross_earnings, employee_deductions,
+                        statutory_deductions, employer_contributions, net_pay, journal_voucher_id,
+                        created_at, updated_at, revision)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                    params![
+                        run.id,
+                        run.company_id,
+                        run.number,
+                        run.period,
+                        run.period_start,
+                        run.period_end,
+                        run.payment_date,
+                        run.status,
+                        run.employee_count,
+                        run.gross_earnings,
+                        run.employee_deductions,
+                        run.statutory_deductions,
+                        run.employer_contributions,
+                        run.net_pay,
+                        run.journal_voucher_id,
+                        run.created_at,
+                        run.updated_at,
+                        run.revision,
+                    ],
+                )
+                .map_err(|error| db_error("A payroll run could not be written", error))?;
+        }
+        for snapshot in &payroll_snapshots {
+            transaction
+                .execute(
+                    "INSERT INTO payroll_run_snapshots (id, company_id, run_id, employee_id, snapshot,
+                        created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        snapshot.id,
+                        snapshot.company_id,
+                        snapshot.run_id,
+                        snapshot.employee_id,
+                        snapshot.snapshot.to_string(),
+                        snapshot.created_at,
+                    ],
+                )
+                .map_err(|error| db_error("A payroll snapshot could not be written", error))?;
+        }
+        for accounts in &payroll_accounts {
+            transaction
+                .execute(
+                    "INSERT INTO payroll_accounts (id, company_id, salary_expense_ledger_id,
+                        net_salary_payable_ledger_id, employee_deductions_payable_ledger_id,
+                        statutory_deductions_payable_ledger_id,
+                        employer_contributions_payable_ledger_id, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        accounts.id,
+                        accounts.company_id,
+                        accounts.salary_expense_ledger_id,
+                        accounts.net_salary_payable_ledger_id,
+                        accounts.employee_deductions_payable_ledger_id,
+                        accounts.statutory_deductions_payable_ledger_id,
+                        accounts.employer_contributions_payable_ledger_id,
+                        accounts.created_at,
+                    ],
+                )
+                .map_err(|error| db_error("The payroll accounts could not be written", error))?;
+        }
+        for rule in &statutory_rule_versions {
+            transaction
+                .execute(
+                    "INSERT INTO statutory_rule_versions (id, company_id, rule_set, effective_from,
+                        effective_to, status, source, summary, parameters, acknowledged,
+                        acknowledged_by, acknowledged_at, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        rule.id,
+                        rule.company_id,
+                        rule.rule_set,
+                        rule.effective_from,
+                        rule.effective_to,
+                        rule.status,
+                        rule.source,
+                        rule.summary,
+                        rule.parameters.to_string(),
+                        int_from_bool(rule.acknowledged),
+                        rule.acknowledged_by,
+                        rule.acknowledged_at,
+                        rule.created_at,
+                    ],
+                )
+                .map_err(|error| db_error("A statutory rule could not be written", error))?;
         }
         for completion in &production_completions {
             transaction
@@ -2925,6 +3178,18 @@ pub fn cancel_voucher(
 
 /// The write path shared by posting and cancelling.
 fn write_posting(database: &Database, payload: PostingPayload) -> Result<Voucher, String> {
+    database.transaction(|transaction| write_posting_in(transaction, &payload))
+}
+
+/// The write path, inside a transaction that is already open.
+///
+/// The body is available on its own so that a payroll run can write its
+/// journal voucher and record that it has been posted in one transaction:
+/// either both happen or neither does.
+fn write_posting_in(
+    transaction: &Transaction<'_>,
+    payload: &PostingPayload,
+) -> Result<Voucher, String> {
     let voucher = &payload.voucher;
 
     if payload.entries.is_empty() {
@@ -2983,248 +3248,246 @@ fn write_posting(database: &Database, payload: PostingPayload) -> Result<Voucher
         check_money(completion.cost, "The production cost")?;
     }
 
-    database.transaction(|transaction| {
-        ensure_company(transaction, &voucher.company_id)?;
+    ensure_company(transaction, &voucher.company_id)?;
 
-        // The voucher and its lines.
+    // The voucher and its lines.
+    transaction
+        .execute(
+            "INSERT INTO vouchers (id, company_id, kind, number, date, due_date, payment_term_id,
+                party_id, narration, reference, status, linked_voucher_id,
+                reversed_by_voucher_id, is_locked, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             ON CONFLICT(id) DO UPDATE SET
+                kind = excluded.kind,
+                number = excluded.number,
+                date = excluded.date,
+                due_date = excluded.due_date,
+                payment_term_id = excluded.payment_term_id,
+                party_id = excluded.party_id,
+                narration = excluded.narration,
+                reference = excluded.reference,
+                status = excluded.status,
+                linked_voucher_id = excluded.linked_voucher_id,
+                reversed_by_voucher_id = excluded.reversed_by_voucher_id,
+                is_locked = excluded.is_locked,
+                updated_at = excluded.updated_at",
+            params![
+                voucher.id,
+                voucher.company_id,
+                voucher.kind,
+                voucher.number,
+                voucher.date,
+                voucher.due_date,
+                voucher.payment_term_id,
+                voucher.party_id,
+                voucher.narration,
+                voucher.reference,
+                voucher.status,
+                voucher.linked_voucher_id,
+                voucher.reversed_by_voucher_id,
+                int_from_bool(voucher.is_locked),
+                voucher.created_at,
+                voucher.updated_at,
+            ],
+        )
+        .map_err(|error| db_error("The voucher could not be posted", error))?;
+
+    transaction
+        .execute(
+            "DELETE FROM voucher_entries WHERE voucher_id = ?1 AND company_id = ?2",
+            params![voucher.id, voucher.company_id],
+        )
+        .map_err(|error| db_error("The voucher entries could not be replaced", error))?;
+    transaction
+        .execute(
+            "DELETE FROM voucher_items WHERE voucher_id = ?1 AND company_id = ?2",
+            params![voucher.id, voucher.company_id],
+        )
+        .map_err(|error| db_error("The voucher item lines could not be replaced", error))?;
+    transaction
+        .execute(
+            "DELETE FROM voucher_taxes WHERE voucher_id = ?1 AND company_id = ?2",
+            params![voucher.id, voucher.company_id],
+        )
+        .map_err(|error| db_error("The voucher tax lines could not be replaced", error))?;
+
+    for entry in &payload.entries {
         transaction
             .execute(
-                "INSERT INTO vouchers (id, company_id, kind, number, date, due_date, payment_term_id,
-                    party_id, narration, reference, status, linked_voucher_id,
-                    reversed_by_voucher_id, is_locked, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
-                 ON CONFLICT(id) DO UPDATE SET
-                    kind = excluded.kind,
-                    number = excluded.number,
-                    date = excluded.date,
-                    due_date = excluded.due_date,
-                    payment_term_id = excluded.payment_term_id,
-                    party_id = excluded.party_id,
-                    narration = excluded.narration,
-                    reference = excluded.reference,
-                    status = excluded.status,
-                    linked_voucher_id = excluded.linked_voucher_id,
-                    reversed_by_voucher_id = excluded.reversed_by_voucher_id,
-                    is_locked = excluded.is_locked,
-                    updated_at = excluded.updated_at",
+                "INSERT INTO voucher_entries (id, voucher_id, company_id, ledger_id, debit,
+                    credit, narration, cost_centre_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
+                    entry.id,
                     voucher.id,
                     voucher.company_id,
-                    voucher.kind,
-                    voucher.number,
-                    voucher.date,
-                    voucher.due_date,
-                    voucher.payment_term_id,
-                    voucher.party_id,
-                    voucher.narration,
-                    voucher.reference,
-                    voucher.status,
-                    voucher.linked_voucher_id,
-                    voucher.reversed_by_voucher_id,
-                    int_from_bool(voucher.is_locked),
-                    voucher.created_at,
-                    voucher.updated_at,
+                    entry.ledger_id,
+                    entry.debit,
+                    entry.credit,
+                    entry.narration,
+                    entry.cost_centre_id
                 ],
             )
-            .map_err(|error| db_error("The voucher could not be posted", error))?;
+            .map_err(|error| {
+                db_error("A voucher entry could not be saved. Nothing was posted.", error)
+            })?;
+    }
 
+    for item in &payload.items {
         transaction
             .execute(
-                "DELETE FROM voucher_entries WHERE voucher_id = ?1 AND company_id = ?2",
-                params![voucher.id, voucher.company_id],
+                "INSERT INTO voucher_items (id, voucher_id, company_id, item_id, quantity, rate,
+                    discount, tax_category_id, amount, godown_id, batch, quantity_milli,
+                    direct_cost, to_godown_id, order_line_id, production_requirement_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                params![
+                    item.id,
+                    voucher.id,
+                    voucher.company_id,
+                    item.item_id,
+                    round_quantity(item.quantity_milli as f64 / 1000.0),
+                    item.rate,
+                    item.discount,
+                    item.tax_category_id,
+                    item.amount,
+                    item.godown_id,
+                    item.batch,
+                    item.quantity_milli,
+                    item.direct_cost,
+                    item.to_godown_id,
+                    item.order_line_id,
+                    item.production_requirement_id,
+                ],
             )
-            .map_err(|error| db_error("The voucher entries could not be replaced", error))?;
+            .map_err(|error| {
+                db_error("A voucher item line could not be saved. Nothing was posted.", error)
+            })?;
+    }
+
+    for tax in &payload.taxes {
         transaction
             .execute(
-                "DELETE FROM voucher_items WHERE voucher_id = ?1 AND company_id = ?2",
-                params![voucher.id, voucher.company_id],
+                "INSERT INTO voucher_taxes (id, voucher_id, company_id, tax_category_id, taxable, amount)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    tax.id,
+                    voucher.id,
+                    voucher.company_id,
+                    tax.tax_category_id,
+                    tax.taxable,
+                    tax.amount
+                ],
             )
-            .map_err(|error| db_error("The voucher item lines could not be replaced", error))?;
+            .map_err(|error| {
+                db_error("A voucher tax line could not be saved. Nothing was posted.", error)
+            })?;
+    }
+
+    // The stock movements, the costing pools and the location balances
+    // the voucher causes. They are part of the same operation, so they
+    // commit and roll back with the voucher.
+    write_stock(
+        transaction,
+        voucher,
+        &payload.movements,
+        &payload.stock_pools,
+        &payload.stock_locations,
+    )?;
+
+    // The order lines this voucher delivers against, the components it
+    // issues against production orders and the finished goods it receives.
+    // They are part of the same operation, so they commit and roll back
+    // with the voucher: an invoice can never exist without the delivery
+    // it records.
+    write_order_fulfilments(transaction, voucher, &payload.order_fulfilments)?;
+    write_production_issues(transaction, voucher, &payload.production_issues)?;
+    write_production_completions(transaction, voucher, &payload.production_completions)?;
+
+    // The allocations of the affected parties are replaced wholesale, so
+    // the stored records always match the vouchers they came from.
+    for party_id in &payload.affected_party_ids {
         transaction
             .execute(
-                "DELETE FROM voucher_taxes WHERE voucher_id = ?1 AND company_id = ?2",
-                params![voucher.id, voucher.company_id],
+                "DELETE FROM payment_allocations WHERE company_id = ?1 AND party_id = ?2",
+                params![voucher.company_id, party_id],
             )
-            .map_err(|error| db_error("The voucher tax lines could not be replaced", error))?;
+            .map_err(|error| db_error("The allocations could not be replaced", error))?;
+        transaction
+            .execute(
+                "DELETE FROM advances WHERE company_id = ?1 AND party_id = ?2",
+                params![voucher.company_id, party_id],
+            )
+            .map_err(|error| db_error("The advances could not be replaced", error))?;
+    }
 
-        for entry in &payload.entries {
-            transaction
-                .execute(
-                    "INSERT INTO voucher_entries (id, voucher_id, company_id, ledger_id, debit,
-                        credit, narration, cost_centre_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        entry.id,
-                        voucher.id,
-                        voucher.company_id,
-                        entry.ledger_id,
-                        entry.debit,
-                        entry.credit,
-                        entry.narration,
-                        entry.cost_centre_id
-                    ],
-                )
-                .map_err(|error| {
-                    db_error("A voucher entry could not be saved. Nothing was posted.", error)
-                })?;
-        }
+    for allocation in &payload.allocations {
+        transaction
+            .execute(
+                "INSERT INTO payment_allocations (id, company_id, side, payment_voucher_id,
+                    payment_entry_id, invoice_voucher_id, invoice_entry_id, party_id, amount,
+                    created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    allocation.id,
+                    allocation.company_id,
+                    allocation.side,
+                    allocation.payment_voucher_id,
+                    allocation.payment_entry_id,
+                    allocation.invoice_voucher_id,
+                    allocation.invoice_entry_id,
+                    allocation.party_id,
+                    allocation.amount,
+                    allocation.created_at
+                ],
+            )
+            .map_err(|error| {
+                db_error("An allocation could not be saved. Nothing was posted.", error)
+            })?;
+    }
 
-        for item in &payload.items {
-            transaction
-                .execute(
-                    "INSERT INTO voucher_items (id, voucher_id, company_id, item_id, quantity, rate,
-                        discount, tax_category_id, amount, godown_id, batch, quantity_milli,
-                        direct_cost, to_godown_id, order_line_id, production_requirement_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                    params![
-                        item.id,
-                        voucher.id,
-                        voucher.company_id,
-                        item.item_id,
-                        round_quantity(item.quantity_milli as f64 / 1000.0),
-                        item.rate,
-                        item.discount,
-                        item.tax_category_id,
-                        item.amount,
-                        item.godown_id,
-                        item.batch,
-                        item.quantity_milli,
-                        item.direct_cost,
-                        item.to_godown_id,
-                        item.order_line_id,
-                        item.production_requirement_id,
-                    ],
-                )
-                .map_err(|error| {
-                    db_error("A voucher item line could not be saved. Nothing was posted.", error)
-                })?;
-        }
+    for advance in &payload.advances {
+        transaction
+            .execute(
+                "INSERT INTO advances (id, company_id, side, voucher_id, entry_id, party_id, amount, date)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    advance.id,
+                    advance.company_id,
+                    advance.side,
+                    advance.voucher_id,
+                    advance.entry_id,
+                    advance.party_id,
+                    advance.amount,
+                    advance.date
+                ],
+            )
+            .map_err(|error| {
+                db_error("An advance could not be saved. Nothing was posted.", error)
+            })?;
+    }
 
-        for tax in &payload.taxes {
-            transaction
-                .execute(
-                    "INSERT INTO voucher_taxes (id, voucher_id, company_id, tax_category_id, taxable, amount)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        tax.id,
-                        voucher.id,
-                        voucher.company_id,
-                        tax.tax_category_id,
-                        tax.taxable,
-                        tax.amount
-                    ],
-                )
-                .map_err(|error| {
-                    db_error("A voucher tax line could not be saved. Nothing was posted.", error)
-                })?;
-        }
+    for event in &payload.audit_events {
+        transaction
+            .execute(
+                "INSERT INTO audit_events (id, company_id, actor, action, record_type, record_id,
+                    record_label, timestamp, detail)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    event.id,
+                    event.company_id,
+                    payload.actor.as_deref().unwrap_or("local.operator"),
+                    event.action,
+                    event.record_type,
+                    event.record_id,
+                    event.record_label,
+                    event.timestamp,
+                    event.detail
+                ],
+            )
+            .map_err(|error| db_error("The audit entry could not be written", error))?;
+    }
 
-        // The stock movements, the costing pools and the location balances
-        // the voucher causes. They are part of the same operation, so they
-        // commit and roll back with the voucher.
-        write_stock(
-            transaction,
-            voucher,
-            &payload.movements,
-            &payload.stock_pools,
-            &payload.stock_locations,
-        )?;
-
-        // The order lines this voucher delivers against, the components it
-        // issues against production orders and the finished goods it receives.
-        // They are part of the same operation, so they commit and roll back
-        // with the voucher: an invoice can never exist without the delivery
-        // it records.
-        write_order_fulfilments(transaction, voucher, &payload.order_fulfilments)?;
-        write_production_issues(transaction, voucher, &payload.production_issues)?;
-        write_production_completions(transaction, voucher, &payload.production_completions)?;
-
-        // The allocations of the affected parties are replaced wholesale, so
-        // the stored records always match the vouchers they came from.
-        for party_id in &payload.affected_party_ids {
-            transaction
-                .execute(
-                    "DELETE FROM payment_allocations WHERE company_id = ?1 AND party_id = ?2",
-                    params![voucher.company_id, party_id],
-                )
-                .map_err(|error| db_error("The allocations could not be replaced", error))?;
-            transaction
-                .execute(
-                    "DELETE FROM advances WHERE company_id = ?1 AND party_id = ?2",
-                    params![voucher.company_id, party_id],
-                )
-                .map_err(|error| db_error("The advances could not be replaced", error))?;
-        }
-
-        for allocation in &payload.allocations {
-            transaction
-                .execute(
-                    "INSERT INTO payment_allocations (id, company_id, side, payment_voucher_id,
-                        payment_entry_id, invoice_voucher_id, invoice_entry_id, party_id, amount,
-                        created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    params![
-                        allocation.id,
-                        allocation.company_id,
-                        allocation.side,
-                        allocation.payment_voucher_id,
-                        allocation.payment_entry_id,
-                        allocation.invoice_voucher_id,
-                        allocation.invoice_entry_id,
-                        allocation.party_id,
-                        allocation.amount,
-                        allocation.created_at
-                    ],
-                )
-                .map_err(|error| {
-                    db_error("An allocation could not be saved. Nothing was posted.", error)
-                })?;
-        }
-
-        for advance in &payload.advances {
-            transaction
-                .execute(
-                    "INSERT INTO advances (id, company_id, side, voucher_id, entry_id, party_id, amount, date)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        advance.id,
-                        advance.company_id,
-                        advance.side,
-                        advance.voucher_id,
-                        advance.entry_id,
-                        advance.party_id,
-                        advance.amount,
-                        advance.date
-                    ],
-                )
-                .map_err(|error| {
-                    db_error("An advance could not be saved. Nothing was posted.", error)
-                })?;
-        }
-
-        for event in &payload.audit_events {
-            transaction
-                .execute(
-                    "INSERT INTO audit_events (id, company_id, actor, action, record_type, record_id,
-                        record_label, timestamp, detail)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        event.id,
-                        event.company_id,
-                        payload.actor.as_deref().unwrap_or("local.operator"),
-                        event.action,
-                        event.record_type,
-                        event.record_id,
-                        event.record_label,
-                        event.timestamp,
-                        event.detail
-                    ],
-                )
-                .map_err(|error| db_error("The audit entry could not be written", error))?;
-        }
-
-        Ok(voucher.clone())
-    })
+    Ok(voucher.clone())
 }
 
 #[tauri::command]
@@ -6630,4 +6893,1617 @@ pub fn release_production_order_cmd(
     actor: String,
 ) -> Result<ProductionOrderDetail, String> {
     workspace.with_database(|db| release_production_order(db, &company_id, &id, &actor))
+}
+
+// ---------------------------------------------------------------------------
+// Payroll
+// ---------------------------------------------------------------------------
+
+/// The message a refused salary structure carries.
+pub const SALARY_STRUCTURE_LOCKED_MESSAGE: &str =
+    "This salary structure version has been used and cannot be changed. Create a new version.";
+
+/// The message a refused deletion carries.
+pub const PAYROLL_RUN_DELETE_MESSAGE: &str = "Only a draft payroll run can be deleted.";
+
+/// The message a refused posting carries.
+pub const PAYROLL_RUN_STATE_MESSAGE: &str =
+    "This payroll run cannot be posted from its current state.";
+
+/// The message a repeated posting carries.
+pub const PAYROLL_RUN_POSTED_MESSAGE: &str = "This payroll run has already been posted.";
+
+/// The JSON document stored in a column, read back as it was written.
+fn json_from_text(text: &str, context: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(text).map_err(|error| db_error(context, error))
+}
+
+/// The components of a structure, compared without their identifiers.
+///
+/// A version that is saved again with the same components is the same
+/// version, so the identifiers may differ without the version having changed.
+fn component_fingerprints(components: &[SalaryComponent]) -> Vec<String> {
+    let mut prints: Vec<String> = components
+        .iter()
+        .map(|component| {
+            format!(
+                "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+                component.code,
+                component.name,
+                component.kind,
+                serde_json::to_string(&component.calculation).unwrap_or_default(),
+                serde_json::to_string(&component.bases).unwrap_or_default(),
+                component.position,
+            )
+        })
+        .collect();
+    prints.sort();
+    prints
+}
+
+/// The employee must belong to the company.
+fn ensure_employee_in_company(
+    transaction: &Transaction<'_>,
+    company_id: &str,
+    employee_id: &str,
+) -> Result<(), String> {
+    let exists: Option<i64> = transaction
+        .query_row(
+            "SELECT 1 FROM employees WHERE id = ?1 AND company_id = ?2",
+            params![employee_id, company_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| db_error("The employee could not be read", error))?;
+    if exists.is_none() {
+        return Err(format!(
+            "The employee {employee_id} does not belong to this company."
+        ));
+    }
+    Ok(())
+}
+
+/// The salary structure must belong to the company.
+fn ensure_structure_in_company(
+    transaction: &Transaction<'_>,
+    company_id: &str,
+    structure_id: &str,
+) -> Result<(), String> {
+    let exists: Option<i64> = transaction
+        .query_row(
+            "SELECT 1 FROM salary_structures WHERE id = ?1 AND company_id = ?2",
+            params![structure_id, company_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| db_error("The salary structure could not be read", error))?;
+    if exists.is_none() {
+        return Err(format!(
+            "The salary structure {structure_id} does not belong to this company."
+        ));
+    }
+    Ok(())
+}
+
+/// The payroll run must belong to the company.
+fn ensure_run_in_company(
+    transaction: &Transaction<'_>,
+    company_id: &str,
+    run_id: &str,
+) -> Result<(), String> {
+    let exists: Option<i64> = transaction
+        .query_row(
+            "SELECT 1 FROM payroll_runs WHERE id = ?1 AND company_id = ?2",
+            params![run_id, company_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| db_error("The payroll run could not be read", error))?;
+    if exists.is_none() {
+        return Err(format!(
+            "The payroll run {run_id} does not belong to this company."
+        ));
+    }
+    Ok(())
+}
+
+/// The components of a structure, read back.
+fn read_salary_components(
+    connection: &Connection,
+    company_id: &str,
+    structure_id: &str,
+) -> Result<Vec<SalaryComponent>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, company_id, structure_id, code, name, kind, calculation, bases, position
+             FROM salary_structure_components
+             WHERE company_id = ?1 AND structure_id = ?2
+             ORDER BY position, code",
+        )
+        .map_err(|error| db_error("The salary components could not be read", error))?;
+    let rows = statement
+        .query_map(params![company_id, structure_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, i64>(8)?,
+            ))
+        })
+        .map_err(|error| db_error("The salary components could not be read", error))?;
+    let mut components = Vec::new();
+    for row in rows {
+        let (id, company, structure, code, name, kind, calculation, bases, position) =
+            row.map_err(|error| db_error("A salary component is unreadable", error))?;
+        components.push(SalaryComponent {
+            id,
+            company_id: company,
+            structure_id: structure,
+            code,
+            name,
+            kind,
+            calculation: json_from_text(
+                &calculation,
+                "The salary component calculation could not be read",
+            )?,
+            bases: json_from_text(&bases, "The salary component bases could not be read")?,
+            position,
+        });
+    }
+    Ok(components)
+}
+
+/// The components of a structure, written.
+fn write_salary_components(
+    transaction: &Transaction<'_>,
+    company_id: &str,
+    structure_id: &str,
+    components: &[SalaryComponent],
+    created_at: &str,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "DELETE FROM salary_structure_components
+             WHERE company_id = ?1 AND structure_id = ?2",
+            params![company_id, structure_id],
+        )
+        .map_err(|error| db_error("The salary components could not be replaced", error))?;
+    for component in components {
+        let calculation = serde_json::to_string(&component.calculation).map_err(|error| {
+            db_error("The salary component calculation could not be written", error)
+        })?;
+        let bases = serde_json::to_string(&component.bases)
+            .map_err(|error| db_error("The salary component bases could not be written", error))?;
+        transaction
+            .execute(
+                "INSERT INTO salary_structure_components (id, company_id, structure_id, code, name,
+                    kind, calculation, bases, position, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    component.id,
+                    company_id,
+                    structure_id,
+                    component.code,
+                    component.name,
+                    component.kind,
+                    calculation,
+                    bases,
+                    component.position,
+                    created_at,
+                ],
+            )
+            .map_err(|error| db_error("A salary component could not be saved", error))?;
+    }
+    Ok(())
+}
+
+/// Save a salary structure and its components.
+///
+/// The version and its components are written in one transaction, so a
+/// structure is never saved without its components. A version that has been
+/// used is never rewritten: a change is a new version.
+pub fn save_salary_structure(
+    database: &Database,
+    structure: SalaryStructure,
+    components: Vec<SalaryComponent>,
+) -> Result<SalaryStructure, String> {
+    database.transaction(|transaction| {
+        save_salary_structure_in(transaction, structure, components)
+    })
+}
+
+/// Save a salary structure inside a transaction that is already open.
+fn save_salary_structure_in(
+    transaction: &Transaction<'_>,
+    structure: SalaryStructure,
+    components: Vec<SalaryComponent>,
+) -> Result<SalaryStructure, String> {
+    ensure_company(transaction, &structure.company_id)?;
+
+    // The components belong to the structure they are saved with.
+    let mut prepared: Vec<SalaryComponent> = Vec::with_capacity(components.len());
+    for mut component in components {
+        if !component.company_id.trim().is_empty() && component.company_id != structure.company_id {
+            return Err(format!(
+                "The component {} does not belong to this company.",
+                component.code
+            ));
+        }
+        if !component.structure_id.trim().is_empty() && component.structure_id != structure.id {
+            return Err(format!(
+                "The component {} belongs to another salary structure.",
+                component.code
+            ));
+        }
+        component.company_id = structure.company_id.clone();
+        component.structure_id = structure.id.clone();
+        prepared.push(component);
+    }
+
+    // Two components cannot share a code within one structure.
+    let mut codes: Vec<String> = Vec::new();
+    for component in &prepared {
+        if codes.contains(&component.code) {
+            return Err(format!(
+                "Two components of the salary structure have the code {}.",
+                component.code
+            ));
+        }
+        codes.push(component.code.clone());
+    }
+
+    // Another structure cannot take this version's number.
+    let duplicate: Option<String> = transaction
+        .query_row(
+            "SELECT id FROM salary_structures
+             WHERE company_id = ?1 AND name = ?2 AND version = ?3 AND id <> ?4",
+            params![
+                structure.company_id,
+                structure.name,
+                structure.version,
+                structure.id
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| db_error("The salary structures could not be read", error))?;
+    if duplicate.is_some() {
+        return Err(format!(
+            "A salary structure named {} already has a version {}.",
+            structure.name, structure.version
+        ));
+    }
+
+    // The version that is being written.
+    let existing: Option<SalaryStructure> = transaction
+        .query_row(
+            "SELECT id, company_id, name, version, effective_from, effective_to, is_active,
+                    created_at, updated_at
+             FROM salary_structures WHERE company_id = ?1 AND id = ?2",
+            params![structure.company_id, structure.id],
+            |row| {
+                Ok(SalaryStructure {
+                    id: row.get(0)?,
+                    company_id: row.get(1)?,
+                    name: row.get(2)?,
+                    version: row.get(3)?,
+                    effective_from: row.get(4)?,
+                    effective_to: row.get(5)?,
+                    is_active: bool_from_int(row.get(6)?),
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| db_error("The salary structure could not be read", error))?;
+
+    let created_at = existing
+        .as_ref()
+        .map(|stored| stored.created_at.clone())
+        .unwrap_or_else(|| structure.created_at.clone());
+
+    match existing {
+        Some(stored) => {
+            // A version that has been used is never rewritten.
+            let stored_components =
+                read_salary_components(transaction, &structure.company_id, &structure.id)?;
+            if component_fingerprints(&stored_components) != component_fingerprints(&prepared) {
+                return Err(SALARY_STRUCTURE_LOCKED_MESSAGE.to_string());
+            }
+            transaction
+                .execute(
+                    "UPDATE salary_structures SET name = ?2, version = ?3, effective_from = ?4,
+                        effective_to = ?5, is_active = ?6, updated_at = ?7
+                     WHERE company_id = ?1 AND id = ?8",
+                    params![
+                        structure.company_id,
+                        structure.name,
+                        structure.version,
+                        structure.effective_from,
+                        structure.effective_to,
+                        int_from_bool(structure.is_active),
+                        structure.updated_at,
+                        structure.id,
+                    ],
+                )
+                .map_err(|error| db_error("The salary structure could not be saved", error))?;
+            // The components are the ones that were stored, so their identity
+            // is kept.
+            let _ = stored;
+        }
+        None => {
+            transaction
+                .execute(
+                    "INSERT INTO salary_structures (id, company_id, name, version, effective_from,
+                        effective_to, is_active, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        structure.id,
+                        structure.company_id,
+                        structure.name,
+                        structure.version,
+                        structure.effective_from,
+                        structure.effective_to,
+                        int_from_bool(structure.is_active),
+                        structure.created_at,
+                        structure.updated_at,
+                    ],
+                )
+                .map_err(|error| db_error("The salary structure could not be saved", error))?;
+            write_salary_components(
+                transaction,
+                &structure.company_id,
+                &structure.id,
+                &prepared,
+                &structure.created_at,
+            )?;
+        }
+    }
+
+    Ok(SalaryStructure {
+        id: structure.id,
+        company_id: structure.company_id,
+        name: structure.name,
+        version: structure.version,
+        effective_from: structure.effective_from,
+        effective_to: structure.effective_to,
+        is_active: structure.is_active,
+        created_at,
+        updated_at: structure.updated_at,
+    })
+}
+
+#[tauri::command]
+pub fn save_salary_structure_cmd(
+    workspace: State<'_, Workspace>,
+    structure: SalaryStructure,
+    components: Vec<SalaryComponent>,
+) -> Result<SalaryStructure, String> {
+    workspace.with_database(|db| save_salary_structure(db, structure, components))
+}
+
+/// The salary structures of a company.
+pub fn list_salary_structures(
+    database: &Database,
+    company_id: &str,
+) -> Result<Vec<SalaryStructure>, String> {
+    let connection = database.lock();
+    let mut statement = connection
+        .prepare(
+            "SELECT id, company_id, name, version, effective_from, effective_to, is_active,
+                    created_at, updated_at
+             FROM salary_structures WHERE company_id = ?1
+             ORDER BY name, version",
+        )
+        .map_err(|error| db_error("The salary structures could not be read", error))?;
+    let rows = statement
+        .query_map(params![company_id], |row| {
+            Ok(SalaryStructure {
+                id: row.get(0)?,
+                company_id: row.get(1)?,
+                name: row.get(2)?,
+                version: row.get(3)?,
+                effective_from: row.get(4)?,
+                effective_to: row.get(5)?,
+                is_active: bool_from_int(row.get(6)?),
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })
+        .map_err(|error| db_error("The salary structures could not be read", error))?;
+    let mut structures = Vec::new();
+    for structure in rows {
+        structures.push(structure.map_err(|error| db_error("A salary structure is unreadable", error))?);
+    }
+    Ok(structures)
+}
+
+#[tauri::command]
+pub fn list_salary_structures_cmd(
+    workspace: State<'_, Workspace>,
+    company_id: String,
+) -> Result<Vec<SalaryStructure>, String> {
+    workspace.with_database(|db| list_salary_structures(db, &company_id))
+}
+
+/// A salary structure and the components it is made of.
+pub fn get_salary_structure(
+    database: &Database,
+    company_id: &str,
+    id: &str,
+) -> Result<SalaryStructureDetail, String> {
+    let connection = database.lock();
+    let structure = connection
+        .query_row(
+            "SELECT id, company_id, name, version, effective_from, effective_to, is_active,
+                    created_at, updated_at
+             FROM salary_structures WHERE company_id = ?1 AND id = ?2",
+            params![company_id, id],
+            |row| {
+                Ok(SalaryStructure {
+                    id: row.get(0)?,
+                    company_id: row.get(1)?,
+                    name: row.get(2)?,
+                    version: row.get(3)?,
+                    effective_from: row.get(4)?,
+                    effective_to: row.get(5)?,
+                    is_active: bool_from_int(row.get(6)?),
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| db_error("The salary structure could not be read", error))?
+        .ok_or_else(|| "The salary structure was not found.".to_string())?;
+    let components = read_salary_components(&connection, company_id, id)?;
+    Ok(SalaryStructureDetail {
+        structure,
+        components,
+    })
+}
+
+#[tauri::command]
+pub fn get_salary_structure_cmd(
+    workspace: State<'_, Workspace>,
+    company_id: String,
+    id: String,
+) -> Result<SalaryStructureDetail, String> {
+    workspace.with_database(|db| get_salary_structure(db, &company_id, &id))
+}
+
+/// Save the assignment of an employee to a salary structure.
+pub fn save_salary_assignment(
+    database: &Database,
+    assignment: SalaryAssignment,
+) -> Result<SalaryAssignment, String> {
+    database.transaction(|transaction| {
+        ensure_company(transaction, &assignment.company_id)?;
+        ensure_employee_in_company(transaction, &assignment.company_id, &assignment.employee_id)?;
+        ensure_structure_in_company(transaction, &assignment.company_id, &assignment.structure_id)?;
+        transaction
+            .execute(
+                "INSERT INTO salary_assignments (id, company_id, employee_id, structure_id,
+                    effective_from, effective_to, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(id) DO UPDATE SET employee_id = excluded.employee_id,
+                    structure_id = excluded.structure_id,
+                    effective_from = excluded.effective_from,
+                    effective_to = excluded.effective_to",
+                params![
+                    assignment.id,
+                    assignment.company_id,
+                    assignment.employee_id,
+                    assignment.structure_id,
+                    assignment.effective_from,
+                    assignment.effective_to,
+                    assignment.created_at,
+                ],
+            )
+            .map_err(|error| db_error("The salary assignment could not be saved", error))?;
+        Ok(assignment)
+    })
+}
+
+#[tauri::command]
+pub fn save_salary_assignment_cmd(
+    workspace: State<'_, Workspace>,
+    assignment: SalaryAssignment,
+) -> Result<SalaryAssignment, String> {
+    workspace.with_database(|db| save_salary_assignment(db, assignment))
+}
+
+/// The salary assignments of a company.
+pub fn list_salary_assignments(
+    database: &Database,
+    company_id: &str,
+) -> Result<Vec<SalaryAssignment>, String> {
+    let connection = database.lock();
+    let mut statement = connection
+        .prepare(
+            "SELECT id, company_id, employee_id, structure_id, effective_from, effective_to,
+                    created_at
+             FROM salary_assignments WHERE company_id = ?1
+             ORDER BY employee_id, effective_from",
+        )
+        .map_err(|error| db_error("The salary assignments could not be read", error))?;
+    let rows = statement
+        .query_map(params![company_id], |row| {
+            Ok(SalaryAssignment {
+                id: row.get(0)?,
+                company_id: row.get(1)?,
+                employee_id: row.get(2)?,
+                structure_id: row.get(3)?,
+                effective_from: row.get(4)?,
+                effective_to: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|error| db_error("The salary assignments could not be read", error))?;
+    let mut assignments = Vec::new();
+    for assignment in rows {
+        assignments
+            .push(assignment.map_err(|error| db_error("A salary assignment is unreadable", error))?);
+    }
+    Ok(assignments)
+}
+
+#[tauri::command]
+pub fn list_salary_assignments_cmd(
+    workspace: State<'_, Workspace>,
+    company_id: String,
+) -> Result<Vec<SalaryAssignment>, String> {
+    workspace.with_database(|db| list_salary_assignments(db, &company_id))
+}
+
+/// Save what happened in a period for one employee.
+///
+/// An employee's attendance for a period is one record: the second save
+/// replaces the first and keeps its identity.
+pub fn save_attendance(
+    database: &Database,
+    attendance: PayrollAttendance,
+) -> Result<PayrollAttendance, String> {
+    check_money(attendance.other_deductions, "The other deductions")?;
+    database.transaction(|transaction| {
+        ensure_company(transaction, &attendance.company_id)?;
+        ensure_employee_in_company(transaction, &attendance.company_id, &attendance.employee_id)?;
+        // The identifier must not already belong to another employee's record.
+        let clash: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM payroll_attendance
+                 WHERE company_id = ?1 AND id = ?2
+                   AND NOT (employee_id = ?3 AND period = ?4)",
+                params![
+                    attendance.company_id,
+                    attendance.id,
+                    attendance.employee_id,
+                    attendance.period
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| db_error("The attendance could not be read", error))?;
+        if clash.is_some() {
+            return Err(
+                "That attendance record identifier is already used for another employee.".to_string(),
+            );
+        }
+        let existing_id: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM payroll_attendance
+                 WHERE company_id = ?1 AND employee_id = ?2 AND period = ?3",
+                params![
+                    attendance.company_id,
+                    attendance.employee_id,
+                    attendance.period
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| db_error("The attendance could not be read", error))?;
+        let id = existing_id.unwrap_or_else(|| attendance.id.clone());
+        transaction
+            .execute(
+                "INSERT INTO payroll_attendance (id, company_id, employee_id, period, payable_days,
+                    lop_days, extra_days, other_deductions, note, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(id) DO UPDATE SET payable_days = excluded.payable_days,
+                    lop_days = excluded.lop_days, extra_days = excluded.extra_days,
+                    other_deductions = excluded.other_deductions, note = excluded.note,
+                    updated_at = excluded.updated_at",
+                params![
+                    id,
+                    attendance.company_id,
+                    attendance.employee_id,
+                    attendance.period,
+                    attendance.payable_days,
+                    attendance.lop_days,
+                    attendance.extra_days,
+                    attendance.other_deductions,
+                    attendance.note,
+                    attendance.created_at,
+                    attendance.updated_at,
+                ],
+            )
+            .map_err(|error| db_error("The attendance could not be saved", error))?;
+        Ok(PayrollAttendance { id, ..attendance })
+    })
+}
+
+#[tauri::command]
+pub fn save_attendance_cmd(
+    workspace: State<'_, Workspace>,
+    attendance: PayrollAttendance,
+) -> Result<PayrollAttendance, String> {
+    workspace.with_database(|db| save_attendance(db, attendance))
+}
+
+/// The attendance of a period.
+pub fn list_attendance(
+    database: &Database,
+    company_id: &str,
+    period: &str,
+) -> Result<Vec<PayrollAttendance>, String> {
+    let connection = database.lock();
+    let mut statement = connection
+        .prepare(
+            "SELECT id, company_id, employee_id, period, payable_days, lop_days, extra_days,
+                    other_deductions, note, created_at, updated_at
+             FROM payroll_attendance WHERE company_id = ?1 AND period = ?2
+             ORDER BY employee_id",
+        )
+        .map_err(|error| db_error("The attendance could not be read", error))?;
+    let rows = statement
+        .query_map(params![company_id, period], |row| {
+            Ok(PayrollAttendance {
+                id: row.get(0)?,
+                company_id: row.get(1)?,
+                employee_id: row.get(2)?,
+                period: row.get(3)?,
+                payable_days: row.get(4)?,
+                lop_days: row.get(5)?,
+                extra_days: row.get(6)?,
+                other_deductions: row.get(7)?,
+                note: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })
+        .map_err(|error| db_error("The attendance could not be read", error))?;
+    let mut records = Vec::new();
+    for record in rows {
+        records.push(record.map_err(|error| db_error("An attendance record is unreadable", error))?);
+    }
+    Ok(records)
+}
+
+#[tauri::command]
+pub fn list_attendance_cmd(
+    workspace: State<'_, Workspace>,
+    company_id: String,
+    period: String,
+) -> Result<Vec<PayrollAttendance>, String> {
+    workspace.with_database(|db| list_attendance(db, &company_id, &period))
+}
+
+/// A payroll run, read back from the database.
+fn read_payroll_run(
+    connection: &Connection,
+    company_id: &str,
+    id: &str,
+) -> Result<Option<PayrollRun>, String> {
+    connection
+        .query_row(
+            "SELECT id, company_id, number, period, period_start, period_end, payment_date,
+                    status, employee_count, gross_earnings, employee_deductions,
+                    statutory_deductions, employer_contributions, net_pay, journal_voucher_id,
+                    created_at, updated_at, revision
+             FROM payroll_runs WHERE company_id = ?1 AND id = ?2",
+            params![company_id, id],
+            |row| {
+                Ok(PayrollRun {
+                    id: row.get(0)?,
+                    company_id: row.get(1)?,
+                    number: row.get(2)?,
+                    period: row.get(3)?,
+                    period_start: row.get(4)?,
+                    period_end: row.get(5)?,
+                    payment_date: row.get(6)?,
+                    status: row.get(7)?,
+                    employee_count: row.get(8)?,
+                    gross_earnings: row.get(9)?,
+                    employee_deductions: row.get(10)?,
+                    statutory_deductions: row.get(11)?,
+                    employer_contributions: row.get(12)?,
+                    net_pay: row.get(13)?,
+                    journal_voucher_id: row.get(14)?,
+                    created_at: row.get(15)?,
+                    updated_at: row.get(16)?,
+                    revision: row.get(17)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| db_error("The payroll run could not be read", error))
+}
+
+/// Save a payroll run.
+///
+/// The run is stored as it is given. A run that has been posted keeps the
+/// journal voucher it was posted with, and a journal voucher belongs to one
+/// run only.
+pub fn save_payroll_run(
+    database: &Database,
+    run: PayrollRun,
+) -> Result<PayrollRun, String> {
+    check_money(run.gross_earnings, "The gross earnings")?;
+    check_money(run.employee_deductions, "The employee deductions")?;
+    check_money(run.statutory_deductions, "The statutory deductions")?;
+    check_money(run.employer_contributions, "The employer contributions")?;
+    check_money(run.net_pay, "The net pay")?;
+    database.transaction(|transaction| save_payroll_run_in(transaction, run))
+}
+
+/// Save a payroll run inside a transaction that is already open.
+fn save_payroll_run_in(
+    transaction: &Transaction<'_>,
+    run: PayrollRun,
+) -> Result<PayrollRun, String> {
+    ensure_company(transaction, &run.company_id)?;
+
+    // Another run does not carry the same number.
+    let numbered: Option<String> = transaction
+        .query_row(
+            "SELECT id FROM payroll_runs
+             WHERE company_id = ?1 AND number = ?2 AND id <> ?3",
+            params![run.company_id, run.number, run.id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| db_error("The payroll runs could not be read", error))?;
+    if numbered.is_some() {
+        return Err(format!(
+            "A payroll run numbered {} already exists.",
+            run.number
+        ));
+    }
+
+    // A journal voucher belongs to one run only.
+    if let Some(journal_voucher_id) = run.journal_voucher_id.as_deref() {
+        if !journal_voucher_id.trim().is_empty() {
+            let claimed: Option<String> = transaction
+                .query_row(
+                    "SELECT id FROM payroll_runs
+                     WHERE company_id = ?1 AND journal_voucher_id = ?2 AND id <> ?3",
+                    params![run.company_id, journal_voucher_id, run.id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| db_error("The payroll runs could not be read", error))?;
+            if let Some(other) = claimed {
+                return Err(format!(
+                    "The journal voucher {journal_voucher_id} is already claimed by the payroll run {other}."
+                ));
+            }
+        }
+    }
+
+    // A run that has been posted keeps the journal voucher it was posted
+    // with, so the journal and the run always agree.
+    let stored = read_payroll_run(transaction, &run.company_id, &run.id)?;
+    if let Some(stored) = &stored {
+        if let Some(posted) = stored.journal_voucher_id.as_deref() {
+            let incoming = run.journal_voucher_id.as_deref().unwrap_or("").trim();
+            if !incoming.is_empty() && incoming != posted {
+                return Err(
+                    "A posted payroll run keeps the journal voucher it was posted with."
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    // The journal voucher of a run that already has one is never cleared.
+    let journal_voucher_id = match run.journal_voucher_id.as_deref() {
+        Some(id) if !id.trim().is_empty() => Some(id.to_string()),
+        _ => stored
+            .as_ref()
+            .and_then(|stored| stored.journal_voucher_id.clone()),
+    };
+
+    let created_at = stored
+        .as_ref()
+        .map(|stored| stored.created_at.clone())
+        .unwrap_or_else(|| run.created_at.clone());
+
+    transaction
+        .execute(
+            "INSERT INTO payroll_runs (id, company_id, number, period, period_start, period_end,
+                payment_date, status, employee_count, gross_earnings, employee_deductions,
+                statutory_deductions, employer_contributions, net_pay, journal_voucher_id,
+                created_at, updated_at, revision)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+             ON CONFLICT(id) DO UPDATE SET number = excluded.number, period = excluded.period,
+                period_start = excluded.period_start, period_end = excluded.period_end,
+                payment_date = excluded.payment_date, status = excluded.status,
+                employee_count = excluded.employee_count,
+                gross_earnings = excluded.gross_earnings,
+                employee_deductions = excluded.employee_deductions,
+                statutory_deductions = excluded.statutory_deductions,
+                employer_contributions = excluded.employer_contributions,
+                net_pay = excluded.net_pay,
+                journal_voucher_id = excluded.journal_voucher_id,
+                updated_at = excluded.updated_at, revision = excluded.revision",
+            params![
+                run.id,
+                run.company_id,
+                run.number,
+                run.period,
+                run.period_start,
+                run.period_end,
+                run.payment_date,
+                run.status,
+                run.employee_count,
+                run.gross_earnings,
+                run.employee_deductions,
+                run.statutory_deductions,
+                run.employer_contributions,
+                run.net_pay,
+                journal_voucher_id,
+                created_at,
+                run.updated_at,
+                run.revision,
+            ],
+        )
+        .map_err(|error| db_error("The payroll run could not be saved", error))?;
+
+    Ok(PayrollRun {
+        id: run.id,
+        company_id: run.company_id,
+        number: run.number,
+        period: run.period,
+        period_start: run.period_start,
+        period_end: run.period_end,
+        payment_date: run.payment_date,
+        status: run.status,
+        employee_count: run.employee_count,
+        gross_earnings: run.gross_earnings,
+        employee_deductions: run.employee_deductions,
+        statutory_deductions: run.statutory_deductions,
+        employer_contributions: run.employer_contributions,
+        net_pay: run.net_pay,
+        journal_voucher_id,
+        created_at,
+        updated_at: run.updated_at,
+        revision: run.revision,
+    })
+}
+
+#[tauri::command]
+pub fn save_payroll_run_cmd(
+    workspace: State<'_, Workspace>,
+    run: PayrollRun,
+) -> Result<PayrollRun, String> {
+    workspace.with_database(|db| save_payroll_run(db, run))
+}
+
+/// A payroll run and the snapshots it carries.
+pub fn get_payroll_run(
+    database: &Database,
+    company_id: &str,
+    id: &str,
+) -> Result<PayrollRunDetail, String> {
+    let connection = database.lock();
+    let run = read_payroll_run(&connection, company_id, id)?
+        .ok_or_else(|| "The payroll run was not found.".to_string())?;
+    let snapshots = read_payroll_snapshots(&connection, company_id, id)?;
+    Ok(PayrollRunDetail { run, snapshots })
+}
+
+#[tauri::command]
+pub fn get_payroll_run_cmd(
+    workspace: State<'_, Workspace>,
+    company_id: String,
+    id: String,
+) -> Result<PayrollRunDetail, String> {
+    workspace.with_database(|db| get_payroll_run(db, &company_id, &id))
+}
+
+/// The snapshots of a run, read back.
+fn read_payroll_snapshots(
+    connection: &Connection,
+    company_id: &str,
+    run_id: &str,
+) -> Result<Vec<PayrollSnapshot>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, company_id, run_id, employee_id, snapshot, created_at
+             FROM payroll_run_snapshots WHERE company_id = ?1 AND run_id = ?2
+             ORDER BY employee_id",
+        )
+        .map_err(|error| db_error("The payroll snapshots could not be read", error))?;
+    let rows = statement
+        .query_map(params![company_id, run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .map_err(|error| db_error("The payroll snapshots could not be read", error))?;
+    let mut snapshots = Vec::new();
+    for row in rows {
+        let (id, company, run, employee, snapshot, created_at) =
+            row.map_err(|error| db_error("A payroll snapshot is unreadable", error))?;
+        snapshots.push(PayrollSnapshot {
+            id,
+            company_id: company,
+            run_id: run,
+            employee_id: employee,
+            snapshot: json_from_text(&snapshot, "The payroll snapshot could not be read")?,
+            created_at,
+        });
+    }
+    Ok(snapshots)
+}
+
+/// Save the snapshots of a payroll run.
+///
+/// The snapshots of one run are written together, so a calculated run either
+/// carries all of them or carries none of them.
+pub fn save_payroll_snapshots(
+    database: &Database,
+    snapshots: Vec<PayrollSnapshot>,
+) -> Result<Vec<PayrollSnapshot>, String> {
+    database.transaction(|transaction| {
+        let mut saved: Vec<PayrollSnapshot> = Vec::with_capacity(snapshots.len());
+        for snapshot in snapshots {
+            ensure_company(transaction, &snapshot.company_id)?;
+            ensure_run_in_company(transaction, &snapshot.company_id, &snapshot.run_id)?;
+            let text = serde_json::to_string(&snapshot.snapshot)
+                .map_err(|error| db_error("The payroll snapshot could not be written", error))?;
+            transaction
+                .execute(
+                    "INSERT INTO payroll_run_snapshots (id, company_id, run_id, employee_id,
+                        snapshot, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(company_id, run_id, employee_id) DO UPDATE SET
+                        snapshot = excluded.snapshot",
+                    params![
+                        snapshot.id,
+                        snapshot.company_id,
+                        snapshot.run_id,
+                        snapshot.employee_id,
+                        text,
+                        snapshot.created_at,
+                    ],
+                )
+                .map_err(|error| db_error("The payroll snapshot could not be saved", error))?;
+            saved.push(snapshot);
+        }
+        Ok(saved)
+    })
+}
+
+#[tauri::command]
+pub fn save_payroll_snapshots_cmd(
+    workspace: State<'_, Workspace>,
+    snapshots: Vec<PayrollSnapshot>,
+) -> Result<Vec<PayrollSnapshot>, String> {
+    workspace.with_database(|db| save_payroll_snapshots(db, snapshots))
+}
+
+/// The payroll runs of a company.
+pub fn list_payroll_runs(
+    database: &Database,
+    company_id: &str,
+) -> Result<Vec<PayrollRun>, String> {
+    let connection = database.lock();
+    let mut statement = connection
+        .prepare(
+            "SELECT id, company_id, number, period, period_start, period_end, payment_date,
+                    status, employee_count, gross_earnings, employee_deductions,
+                    statutory_deductions, employer_contributions, net_pay, journal_voucher_id,
+                    created_at, updated_at, revision
+             FROM payroll_runs WHERE company_id = ?1
+             ORDER BY period DESC, number DESC",
+        )
+        .map_err(|error| db_error("The payroll runs could not be read", error))?;
+    let rows = statement
+        .query_map(params![company_id], |row| {
+            Ok(PayrollRun {
+                id: row.get(0)?,
+                company_id: row.get(1)?,
+                number: row.get(2)?,
+                period: row.get(3)?,
+                period_start: row.get(4)?,
+                period_end: row.get(5)?,
+                payment_date: row.get(6)?,
+                status: row.get(7)?,
+                employee_count: row.get(8)?,
+                gross_earnings: row.get(9)?,
+                employee_deductions: row.get(10)?,
+                statutory_deductions: row.get(11)?,
+                employer_contributions: row.get(12)?,
+                net_pay: row.get(13)?,
+                journal_voucher_id: row.get(14)?,
+                created_at: row.get(15)?,
+                updated_at: row.get(16)?,
+                revision: row.get(17)?,
+            })
+        })
+        .map_err(|error| db_error("The payroll runs could not be read", error))?;
+    let mut runs = Vec::new();
+    for run in rows {
+        runs.push(run.map_err(|error| db_error("A payroll run is unreadable", error))?);
+    }
+    Ok(runs)
+}
+
+#[tauri::command]
+pub fn list_payroll_runs_cmd(
+    workspace: State<'_, Workspace>,
+    company_id: String,
+) -> Result<Vec<PayrollRun>, String> {
+    workspace.with_database(|db| list_payroll_runs(db, &company_id))
+}
+
+/// Delete a payroll run.
+///
+/// Only a run that has not been posted can be deleted. A posted run is
+/// reversed, never removed, so that the ledger and the payslips that were
+/// given to people keep saying what they said.
+pub fn delete_payroll_run(
+    database: &Database,
+    company_id: &str,
+    id: &str,
+) -> Result<(), String> {
+    database.transaction(|transaction| {
+        let run = read_payroll_run(transaction, company_id, id)?
+            .ok_or_else(|| "The payroll run was not found.".to_string())?;
+        if run.status != "draft" {
+            return Err(PAYROLL_RUN_DELETE_MESSAGE.to_string());
+        }
+        transaction
+            .execute(
+                "DELETE FROM payroll_runs WHERE company_id = ?1 AND id = ?2",
+                params![company_id, id],
+            )
+            .map_err(|error| db_error("The payroll run could not be deleted", error))?;
+        Ok(())
+    })
+}
+
+#[tauri::command]
+pub fn delete_payroll_run_cmd(
+    workspace: State<'_, Workspace>,
+    company_id: String,
+    id: String,
+) -> Result<(), String> {
+    workspace.with_database(|db| delete_payroll_run(db, &company_id, &id))
+}
+
+/// Save a payment of salary.
+pub fn save_payroll_payment(
+    database: &Database,
+    payment: PayrollPayment,
+) -> Result<PayrollPayment, String> {
+    check_money(payment.amount, "The amount paid")?;
+    database.transaction(|transaction| {
+        ensure_company(transaction, &payment.company_id)?;
+        ensure_run_in_company(transaction, &payment.company_id, &payment.run_id)?;
+        ensure_employee_in_company(transaction, &payment.company_id, &payment.employee_id)?;
+        transaction
+            .execute(
+                "INSERT INTO payroll_payments (id, company_id, run_id, employee_id, amount,
+                    payment_voucher_id, paid_on, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(id) DO UPDATE SET run_id = excluded.run_id,
+                    employee_id = excluded.employee_id, amount = excluded.amount,
+                    payment_voucher_id = excluded.payment_voucher_id, paid_on = excluded.paid_on",
+                params![
+                    payment.id,
+                    payment.company_id,
+                    payment.run_id,
+                    payment.employee_id,
+                    payment.amount,
+                    payment.payment_voucher_id,
+                    payment.paid_on,
+                    payment.created_at,
+                ],
+            )
+            .map_err(|error| db_error("The payroll payment could not be saved", error))?;
+        Ok(payment)
+    })
+}
+
+#[tauri::command]
+pub fn save_payroll_payment_cmd(
+    workspace: State<'_, Workspace>,
+    payment: PayrollPayment,
+) -> Result<PayrollPayment, String> {
+    workspace.with_database(|db| save_payroll_payment(db, payment))
+}
+
+/// The payments of a payroll run.
+pub fn list_payroll_payments(
+    database: &Database,
+    company_id: &str,
+    run_id: &str,
+) -> Result<Vec<PayrollPayment>, String> {
+    let connection = database.lock();
+    let mut statement = connection
+        .prepare(
+            "SELECT id, company_id, run_id, employee_id, amount, payment_voucher_id, paid_on,
+                    created_at
+             FROM payroll_payments WHERE company_id = ?1 AND run_id = ?2
+             ORDER BY employee_id",
+        )
+        .map_err(|error| db_error("The payroll payments could not be read", error))?;
+    let rows = statement
+        .query_map(params![company_id, run_id], |row| {
+            Ok(PayrollPayment {
+                id: row.get(0)?,
+                company_id: row.get(1)?,
+                run_id: row.get(2)?,
+                employee_id: row.get(3)?,
+                amount: row.get(4)?,
+                payment_voucher_id: row.get(5)?,
+                paid_on: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })
+        .map_err(|error| db_error("The payroll payments could not be read", error))?;
+    let mut payments = Vec::new();
+    for payment in rows {
+        payments.push(payment.map_err(|error| db_error("A payroll payment is unreadable", error))?);
+    }
+    Ok(payments)
+}
+
+#[tauri::command]
+pub fn list_payroll_payments_cmd(
+    workspace: State<'_, Workspace>,
+    company_id: String,
+    run_id: String,
+) -> Result<Vec<PayrollPayment>, String> {
+    workspace.with_database(|db| list_payroll_payments(db, &company_id, &run_id))
+}
+
+/// The payroll accounts of a company, when it has any.
+pub fn get_payroll_accounts(
+    database: &Database,
+    company_id: &str,
+) -> Result<Option<PayrollAccounts>, String> {
+    let connection = database.lock();
+    connection
+        .query_row(
+            "SELECT id, company_id, salary_expense_ledger_id, net_salary_payable_ledger_id,
+                    employee_deductions_payable_ledger_id,
+                    statutory_deductions_payable_ledger_id,
+                    employer_contributions_payable_ledger_id, created_at
+             FROM payroll_accounts WHERE company_id = ?1",
+            params![company_id],
+            |row| {
+                Ok(PayrollAccounts {
+                    id: row.get(0)?,
+                    company_id: row.get(1)?,
+                    salary_expense_ledger_id: row.get(2)?,
+                    net_salary_payable_ledger_id: row.get(3)?,
+                    employee_deductions_payable_ledger_id: row.get(4)?,
+                    statutory_deductions_payable_ledger_id: row.get(5)?,
+                    employer_contributions_payable_ledger_id: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| db_error("The payroll accounts could not be read", error))
+}
+
+#[tauri::command]
+pub fn get_payroll_accounts_cmd(
+    workspace: State<'_, Workspace>,
+    company_id: String,
+) -> Result<Option<PayrollAccounts>, String> {
+    workspace.with_database(|db| get_payroll_accounts(db, &company_id))
+}
+
+/// Save the payroll accounts of a company.
+///
+/// The record is kept per company: saving again replaces the accounts in
+/// force and keeps the identity of the record.
+pub fn save_payroll_accounts(
+    database: &Database,
+    accounts: PayrollAccounts,
+) -> Result<PayrollAccounts, String> {
+    database.transaction(|transaction| save_payroll_accounts_in(transaction, accounts))
+}
+
+/// Save the payroll accounts inside a transaction that is already open.
+fn save_payroll_accounts_in(
+    transaction: &Transaction<'_>,
+    accounts: PayrollAccounts,
+) -> Result<PayrollAccounts, String> {
+    ensure_company(transaction, &accounts.company_id)?;
+
+    let ledgers = [
+        ("salary expense", accounts.salary_expense_ledger_id.as_str()),
+        (
+            "net salary payable",
+            accounts.net_salary_payable_ledger_id.as_str(),
+        ),
+        (
+            "employee deductions payable",
+            accounts.employee_deductions_payable_ledger_id.as_str(),
+        ),
+        (
+            "statutory deductions payable",
+            accounts.statutory_deductions_payable_ledger_id.as_str(),
+        ),
+        (
+            "employer contributions payable",
+            accounts.employer_contributions_payable_ledger_id.as_str(),
+        ),
+    ];
+    for (label, ledger_id) in ledgers {
+        if ledger_id.trim().is_empty() {
+            return Err(format!(
+                "The {label} account must be chosen before a payroll run can be posted."
+            ));
+        }
+        let exists: Option<i64> = transaction
+            .query_row(
+                "SELECT 1 FROM ledgers WHERE id = ?1 AND company_id = ?2",
+                params![ledger_id, accounts.company_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| db_error("The ledger could not be read", error))?;
+        if exists.is_none() {
+            return Err(format!(
+                "The {label} account does not belong to this company."
+            ));
+        }
+    }
+
+    // The record keeps its identity across a second save.
+    let existing_id: Option<String> = transaction
+        .query_row(
+            "SELECT id FROM payroll_accounts WHERE company_id = ?1",
+            params![accounts.company_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| db_error("The payroll accounts could not be read", error))?;
+    let id = existing_id.unwrap_or_else(|| accounts.id.clone());
+
+    transaction
+        .execute(
+            "INSERT INTO payroll_accounts (id, company_id, salary_expense_ledger_id,
+                net_salary_payable_ledger_id, employee_deductions_payable_ledger_id,
+                statutory_deductions_payable_ledger_id,
+                employer_contributions_payable_ledger_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(company_id) DO UPDATE SET
+                salary_expense_ledger_id = excluded.salary_expense_ledger_id,
+                net_salary_payable_ledger_id = excluded.net_salary_payable_ledger_id,
+                employee_deductions_payable_ledger_id = excluded.employee_deductions_payable_ledger_id,
+                statutory_deductions_payable_ledger_id = excluded.statutory_deductions_payable_ledger_id,
+                employer_contributions_payable_ledger_id = excluded.employer_contributions_payable_ledger_id",
+            params![
+                id,
+                accounts.company_id,
+                accounts.salary_expense_ledger_id,
+                accounts.net_salary_payable_ledger_id,
+                accounts.employee_deductions_payable_ledger_id,
+                accounts.statutory_deductions_payable_ledger_id,
+                accounts.employer_contributions_payable_ledger_id,
+                accounts.created_at,
+            ],
+        )
+        .map_err(|error| db_error("The payroll accounts could not be saved", error))?;
+
+    Ok(PayrollAccounts {
+        id,
+        company_id: accounts.company_id,
+        salary_expense_ledger_id: accounts.salary_expense_ledger_id,
+        net_salary_payable_ledger_id: accounts.net_salary_payable_ledger_id,
+        employee_deductions_payable_ledger_id: accounts.employee_deductions_payable_ledger_id,
+        statutory_deductions_payable_ledger_id: accounts.statutory_deductions_payable_ledger_id,
+        employer_contributions_payable_ledger_id: accounts.employer_contributions_payable_ledger_id,
+        created_at: accounts.created_at,
+    })
+}
+
+#[tauri::command]
+pub fn save_payroll_accounts_cmd(
+    workspace: State<'_, Workspace>,
+    accounts: PayrollAccounts,
+) -> Result<PayrollAccounts, String> {
+    workspace.with_database(|db| save_payroll_accounts(db, accounts))
+}
+
+/// The statutory rule versions of a company.
+pub fn list_statutory_rules(
+    database: &Database,
+    company_id: &str,
+) -> Result<Vec<StatutoryRuleVersion>, String> {
+    let connection = database.lock();
+    let mut statement = connection
+        .prepare(
+            "SELECT id, company_id, rule_set, effective_from, effective_to, status, source, summary,
+                    parameters, acknowledged, acknowledged_by, acknowledged_at, created_at
+             FROM statutory_rule_versions WHERE company_id = ?1
+             ORDER BY rule_set, effective_from",
+        )
+        .map_err(|error| db_error("The statutory rules could not be read", error))?;
+    let rows = statement
+        .query_map(params![company_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, String>(12)?,
+            ))
+        })
+        .map_err(|error| db_error("The statutory rules could not be read", error))?;
+    let mut rules = Vec::new();
+    for row in rows {
+        let (
+            id,
+            company,
+            rule_set,
+            effective_from,
+            effective_to,
+            status,
+            source,
+            summary,
+            parameters,
+            acknowledged,
+            acknowledged_by,
+            acknowledged_at,
+            created_at,
+        ) = row.map_err(|error| db_error("A statutory rule is unreadable", error))?;
+        rules.push(StatutoryRuleVersion {
+            id,
+            company_id: company,
+            rule_set,
+            effective_from,
+            effective_to,
+            status,
+            source,
+            summary,
+            parameters: json_from_text(&parameters, "The statutory rule parameters could not be read")?,
+            acknowledged: bool_from_int(acknowledged),
+            acknowledged_by,
+            acknowledged_at,
+            created_at,
+        });
+    }
+    Ok(rules)
+}
+
+#[tauri::command]
+pub fn list_statutory_rules_cmd(
+    workspace: State<'_, Workspace>,
+    company_id: String,
+) -> Result<Vec<StatutoryRuleVersion>, String> {
+    workspace.with_database(|db| list_statutory_rules(db, &company_id))
+}
+
+/// Save a version of a statutory rule.
+///
+/// A rule version is never deleted: a rule that no longer applies is closed
+/// with an end date, so the payroll that used it can still be explained.
+pub fn save_statutory_rule(
+    database: &Database,
+    rule: StatutoryRuleVersion,
+) -> Result<StatutoryRuleVersion, String> {
+    database.transaction(|transaction| {
+        ensure_company(transaction, &rule.company_id)?;
+
+        // One version of a rule applies from one date.
+        let duplicate: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM statutory_rule_versions
+                 WHERE company_id = ?1 AND rule_set = ?2 AND effective_from = ?3 AND id <> ?4",
+                params![
+                    rule.company_id,
+                    rule.rule_set,
+                    rule.effective_from,
+                    rule.id
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| db_error("The statutory rules could not be read", error))?;
+        if duplicate.is_some() {
+            return Err(format!(
+                "A version of the {} rule already applies from {}.",
+                rule.rule_set, rule.effective_from
+            ));
+        }
+
+        let parameters = serde_json::to_string(&rule.parameters)
+            .map_err(|error| db_error("The statutory rule parameters could not be written", error))?;
+        transaction
+            .execute(
+                "INSERT INTO statutory_rule_versions (id, company_id, rule_set, effective_from,
+                    effective_to, status, source, summary, parameters, acknowledged,
+                    acknowledged_by, acknowledged_at, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT(id) DO UPDATE SET rule_set = excluded.rule_set,
+                    effective_from = excluded.effective_from, effective_to = excluded.effective_to,
+                    status = excluded.status, source = excluded.source, summary = excluded.summary,
+                    parameters = excluded.parameters, acknowledged = excluded.acknowledged,
+                    acknowledged_by = excluded.acknowledged_by,
+                    acknowledged_at = excluded.acknowledged_at",
+                params![
+                    rule.id,
+                    rule.company_id,
+                    rule.rule_set,
+                    rule.effective_from,
+                    rule.effective_to,
+                    rule.status,
+                    rule.source,
+                    rule.summary,
+                    parameters,
+                    int_from_bool(rule.acknowledged),
+                    rule.acknowledged_by,
+                    rule.acknowledged_at,
+                    rule.created_at,
+                ],
+            )
+            .map_err(|error| db_error("The statutory rule could not be saved", error))?;
+        Ok(rule)
+    })
+}
+
+#[tauri::command]
+pub fn save_statutory_rule_cmd(
+    workspace: State<'_, Workspace>,
+    rule: StatutoryRuleVersion,
+) -> Result<StatutoryRuleVersion, String> {
+    workspace.with_database(|db| save_statutory_rule(db, rule))
+}
+
+/// Post a payroll run.
+///
+/// The journal voucher and the run that claims it are written in one
+/// transaction: either the journal is posted and the run is marked posted, or
+/// nothing happened at all. A run is posted at most once.
+pub fn post_payroll_run(
+    database: &Database,
+    company_id: &str,
+    id: &str,
+    payload: PostingPayload,
+) -> Result<PayrollRun, String> {
+    database.transaction(|transaction| {
+        let run = read_payroll_run(transaction, company_id, id)?
+            .ok_or_else(|| "The payroll run was not found.".to_string())?;
+
+        // A run is posted at most once.
+        if matches!(run.status.as_str(), "posted" | "paid" | "reversed") {
+            return Err(PAYROLL_RUN_POSTED_MESSAGE.to_string());
+        }
+        if run.status != "calculated" && run.status != "approved" {
+            return Err(PAYROLL_RUN_STATE_MESSAGE.to_string());
+        }
+
+        // The journal belongs to the same company as the run.
+        if payload.voucher.company_id != company_id {
+            return Err("The journal voucher does not belong to this company.".to_string());
+        }
+
+        // The journal is posted through the ordinary posting path, so it
+        // obeys the same rules as every other voucher.
+        if payload.voucher.status != "posted" {
+            return Err("Only a posted voucher can be posted.".to_string());
+        }
+
+        // A journal voucher belongs to one run only.
+        let claimed: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM payroll_runs
+                 WHERE company_id = ?1 AND journal_voucher_id = ?2 AND id <> ?3",
+                params![company_id, payload.voucher.id, id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| db_error("The payroll runs could not be read", error))?;
+        if let Some(other) = claimed {
+            return Err(format!(
+                "The journal voucher {} is already claimed by the payroll run {other}.",
+                payload.voucher.id
+            ));
+        }
+
+        // The journal is posted through the ordinary posting path, inside this
+        // transaction, so it and the run that claims it commit together.
+        let voucher = write_posting_in(transaction, &payload)?;
+
+        transaction
+            .execute(
+                "UPDATE payroll_runs SET status = 'posted', journal_voucher_id = ?2,
+                    updated_at = ?3, revision = revision + 1
+                 WHERE company_id = ?1 AND id = ?4",
+                params![company_id, voucher.id, payload.voucher.updated_at, id],
+            )
+            .map_err(|error| db_error("The payroll run could not be posted", error))?;
+
+        read_payroll_run(transaction, company_id, id)?
+            .ok_or_else(|| "The payroll run was not found.".to_string())
+    })
+}
+
+#[tauri::command]
+pub fn post_payroll_run_cmd(
+    workspace: State<'_, Workspace>,
+    company_id: String,
+    id: String,
+    payload: PostingPayload,
+) -> Result<PayrollRun, String> {
+    workspace.with_database(|db| post_payroll_run(db, &company_id, &id, payload))
+}
+
+/// The next run number for a period.
+///
+/// The first run of a period is `PR-2026-04`; a second run of the same
+/// period is `PR-2026-04-2`, so a number is never handed out twice.
+pub fn payroll_number(
+    database: &Database,
+    company_id: &str,
+    period: &str,
+) -> Result<String, String> {
+    let base = format!("PR-{period}");
+    let connection = database.lock();
+    let mut statement = connection
+        .prepare("SELECT number FROM payroll_runs WHERE company_id = ?1")
+        .map_err(|error| db_error("The payroll numbering could not be read", error))?;
+    let rows = statement
+        .query_map(params![company_id], |row| row.get::<_, String>(0))
+        .map_err(|error| db_error("The payroll numbering could not be read", error))?;
+    let mut counted = 0;
+    for number in rows {
+        let number = number.map_err(|error| db_error("A payroll run number is unreadable", error))?;
+        // Only the numbers of this period count, so another period does not
+        // restart the count.
+        if number == base || number.starts_with(&format!("{base}-")) {
+            counted += 1;
+        }
+    }
+    if counted == 0 {
+        Ok(base)
+    } else {
+        Ok(format!("{base}-{}", counted + 1))
+    }
+}
+
+#[tauri::command]
+pub fn payroll_number_cmd(
+    workspace: State<'_, Workspace>,
+    company_id: String,
+    period: String,
+) -> Result<String, String> {
+    workspace.with_database(|db| payroll_number(db, &company_id, &period))
 }

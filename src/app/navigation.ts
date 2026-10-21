@@ -120,6 +120,8 @@ export const navigation: NavSection[] = [
       { label: 'Employees', to: '/payroll/employees', icon: 'groups' },
       { label: 'Pay runs', to: '/payroll/pay-runs', icon: 'payments' },
       { label: 'Payslips', to: '/payroll/payslips', icon: 'receipt_long' },
+      { label: 'Reports', to: '/payroll/reports', icon: 'query_stats' },
+      { label: 'Settings', to: '/payroll/settings', icon: 'settings' },
     ],
   },
   {

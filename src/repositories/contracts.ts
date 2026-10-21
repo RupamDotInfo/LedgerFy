@@ -27,13 +27,22 @@ import type {
   OrderRevision,
   OrderRevisionLine,
   PaymentTerm,
+  PayrollAccounts,
+  PayrollAttendance,
+  PayrollPayment,
+  PayrollRun,
+  PayrollSnapshot,
   PriceList,
   PriceListEntry,
   ProductionCompletion,
   ProductionIssue,
   ProductionOrder,
   ProductionRequirement,
+  SalaryAssignment,
+  SalaryComponent,
+  SalaryStructure,
   StatementLine,
+  StatutoryRuleVersion,
   StockGroup,
   StockLocationBalance,
   StockMovement,
@@ -41,6 +50,7 @@ import type {
   TaxCategory,
   Unit,
   Voucher,
+  VoucherEntry,
   VoucherStatus,
   VoucherType,
 } from '@/domain/types'
@@ -191,6 +201,29 @@ export interface ProductionCompletionResult {
   voucher: Voucher
   completions: ProductionCompletion[]
   requirements: ProductionRequirement[]
+}
+
+/**
+ * A salary structure with the components that make it up.
+ *
+ * A structure is versioned, so the components belong to the version and are
+ * never edited under a run that has already used them.
+ */
+export interface SalaryStructureDetail {
+  structure: SalaryStructure
+  components: SalaryComponent[]
+}
+
+/**
+ * A payroll run with the snapshot each employee's pay was taken from.
+ *
+ * The snapshot is the record of the calculation. The payslip is rendered from
+ * it and is never recomputed, so a payslip issued last month still says what
+ * it said.
+ */
+export interface PayrollRunDetail {
+  run: PayrollRun
+  snapshots: PayrollSnapshot[]
 }
 
 export interface OutstandingSummary {
@@ -439,4 +472,71 @@ export interface LedgerFyRepository {
     requirements: ProductionRequirement[],
     issues: ProductionIssue[],
   ): Promise<ProductionCompletionResult>
+
+  // -- Payroll ---------------------------------------------------------------
+
+  /** The salary structures of a company, one row per version. */
+  listSalaryStructures(companyId: string): Promise<SalaryStructure[]>
+  /** One structure with the components that make it up. */
+  getSalaryStructure(companyId: string, id: string): Promise<SalaryStructureDetail | null>
+  /**
+   * Save a structure and the components that make it up.
+   *
+   * A released version is never edited: a change is a new version.
+   */
+  saveSalaryStructure(
+    structure: SalaryStructure,
+    components: SalaryComponent[],
+  ): Promise<SalaryStructure>
+  /** The employees' assignments to a salary structure, with their dates. */
+  listSalaryAssignments(companyId: string): Promise<SalaryAssignment[]>
+  saveSalaryAssignment(assignment: SalaryAssignment): Promise<SalaryAssignment>
+  /** What happened in a period for each employee. */
+  listAttendance(companyId: string, period: string): Promise<PayrollAttendance[]>
+  saveAttendance(attendance: PayrollAttendance): Promise<PayrollAttendance>
+
+  /** The payroll runs of a company. */
+  listPayrollRuns(companyId: string): Promise<PayrollRun[]>
+  /** One run with the snapshot each employee's pay was taken from. */
+  getPayrollRun(companyId: string, id: string): Promise<PayrollRunDetail | null>
+  /**
+   * Save a run and the snapshot it carries.
+   *
+   * The run is the header and the snapshots are its children. The snapshot is
+   * computed by the domain and is stored as it is, so a calculated run and its
+   * figures can never drift apart.
+   */
+  savePayrollRun(run: PayrollRun, snapshots?: PayrollSnapshot[]): Promise<PayrollRun>
+  /** Remove a run that has no financial effect. */
+  deletePayrollRun(companyId: string, id: string): Promise<void>
+  /**
+   * Post a run: the journal it carries, its entries and the run's own state
+   * are written together or not at all.
+   */
+  postPayrollRun(
+    companyId: string,
+    id: string,
+    run: PayrollRun,
+    journal: Voucher,
+    entries: VoucherEntry[],
+  ): Promise<PayrollRun>
+  /** The payments that have settled a run. */
+  listPayrollPayments(companyId: string, runId: string): Promise<PayrollPayment[]>
+  savePayrollPayment(payment: PayrollPayment): Promise<PayrollPayment>
+
+  /**
+   * The company's payroll accounts.
+   *
+   * `null` means the company has not mapped them: no payroll run can be
+   * posted until it has, and no ledger identifier is ever invented.
+   */
+  getPayrollAccounts(companyId: string): Promise<PayrollAccounts | null>
+  savePayrollAccounts(accounts: PayrollAccounts): Promise<PayrollAccounts>
+
+  /** The statutory rules the company holds, with their status and source. */
+  listStatutoryRules(companyId: string): Promise<StatutoryRuleVersion[]>
+  saveStatutoryRule(rule: StatutoryRuleVersion): Promise<StatutoryRuleVersion>
+
+  /** The next number for a payroll run of the given period. */
+  nextPayrollNumber(companyId: string, period: string): Promise<string>
 }

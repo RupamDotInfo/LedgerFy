@@ -54,19 +54,29 @@ import type {
   OrderKind,
   OrderLine,
   PaymentTerm,
+  PayrollAccounts,
+  PayrollAttendance,
+  PayrollPayment,
+  PayrollRun,
+  PayrollSnapshot,
   PriceList,
   PriceListEntry,
   ProductionIssue,
   ProductionOrder,
   ProductionRequirement,
+  SalaryAssignment,
+  SalaryComponent,
+  SalaryStructure,
   StatementLine,
   StockGroup,
   StockLocationBalance,
   StockMovement,
   StockPoolBalance,
+  StatutoryRuleVersion,
   TaxCategory,
   Unit,
   Voucher,
+  VoucherEntry,
   VoucherType,
 } from '@/domain/types'
 import type {
@@ -76,6 +86,8 @@ import type {
   LedgerFyRepository,
   NewCompanyInput,
   RepositoryInfo,
+  PayrollRunDetail,
+  SalaryStructureDetail,
   VoucherFilters,
 } from '@/repositories/contracts'
 import { createDemoDataset, DEMO_TODAY } from '@/repositories/demo/fixtures'
@@ -1489,5 +1501,244 @@ export class DemoRepository implements LedgerFyRepository {
         (completion) => completion.productionOrderId === order.id,
       ),
     }
+  }
+
+  // -- Payroll ---------------------------------------------------------------
+
+  async listSalaryStructures(companyId: string): Promise<SalaryStructure[]> {
+    return tick(this.data.salaryStructures.filter((structure) => structure.companyId === companyId))
+  }
+
+  async getSalaryStructure(
+    companyId: string,
+    id: string,
+  ): Promise<SalaryStructureDetail | null> {
+    const structure = this.data.salaryStructures.find(
+      (candidate) => candidate.id === id && candidate.companyId === companyId,
+    )
+    if (!structure) return tick(null)
+    return tick({
+      structure,
+      components: this.data.salaryComponents.filter(
+        (component) => component.structureId === structure.id,
+      ),
+    })
+  }
+
+  async saveSalaryStructure(
+    structure: SalaryStructure,
+    components: SalaryComponent[],
+  ): Promise<SalaryStructure> {
+    const index = this.data.salaryStructures.findIndex((candidate) => candidate.id === structure.id)
+    if (index >= 0) this.data.salaryStructures[index] = structure
+    else this.data.salaryStructures = [...this.data.salaryStructures, structure]
+
+    this.data.salaryComponents = [
+      ...this.data.salaryComponents.filter(
+        (component) => component.structureId !== structure.id,
+      ),
+      ...components.map((component) => ({ ...component, structureId: structure.id })),
+    ]
+    return tick(structure)
+  }
+
+  async listSalaryAssignments(companyId: string): Promise<SalaryAssignment[]> {
+    return tick(
+      this.data.salaryAssignments.filter((assignment) => assignment.companyId === companyId),
+    )
+  }
+
+  async saveSalaryAssignment(assignment: SalaryAssignment): Promise<SalaryAssignment> {
+    const index = this.data.salaryAssignments.findIndex(
+      (candidate) => candidate.id === assignment.id,
+    )
+    if (index >= 0) this.data.salaryAssignments[index] = assignment
+    else this.data.salaryAssignments = [...this.data.salaryAssignments, assignment]
+    return tick(assignment)
+  }
+
+  async listAttendance(companyId: string, period: string): Promise<PayrollAttendance[]> {
+    return tick(
+      this.data.payrollAttendance.filter(
+        (attendance) => attendance.companyId === companyId && attendance.period === period,
+      ),
+    )
+  }
+
+  async saveAttendance(attendance: PayrollAttendance): Promise<PayrollAttendance> {
+    const index = this.data.payrollAttendance.findIndex(
+      (candidate) => candidate.id === attendance.id,
+    )
+    const stored = { ...attendance, updatedAt: new Date().toISOString() }
+    if (index >= 0) this.data.payrollAttendance[index] = stored
+    else this.data.payrollAttendance = [...this.data.payrollAttendance, stored]
+    return tick(stored)
+  }
+
+  async listPayrollRuns(companyId: string): Promise<PayrollRun[]> {
+    const result = this.data.payrollRuns.filter((run) => run.companyId === companyId)
+    result.sort((left, right) => (left.period < right.period ? 1 : -1))
+    return tick(result)
+  }
+
+  async getPayrollRun(companyId: string, id: string): Promise<PayrollRunDetail | null> {
+    const run = this.data.payrollRuns.find(
+      (candidate) => candidate.id === id && candidate.companyId === companyId,
+    )
+    if (!run) return tick(null)
+    return tick({
+      run,
+      snapshots: this.data.payrollSnapshots.filter((snapshot) => snapshot.runId === run.id),
+    })
+  }
+
+  async savePayrollRun(run: PayrollRun, snapshots: PayrollSnapshot[] = []): Promise<PayrollRun> {
+    const index = this.data.payrollRuns.findIndex((candidate) => candidate.id === run.id)
+    const existing = index >= 0 ? this.data.payrollRuns[index]! : null
+    const stored = {
+      ...run,
+      // A posted run keeps the journal that carried it. Re-saving it never
+      // clears the voucher, or the paid state could never follow.
+      journalVoucherId: run.journalVoucherId ?? existing?.journalVoucherId ?? null,
+      updatedAt: new Date().toISOString(),
+    }
+    if (index >= 0) this.data.payrollRuns[index] = stored
+    else this.data.payrollRuns = [stored, ...this.data.payrollRuns]
+
+    if (snapshots.length) {
+      this.data.payrollSnapshots = [
+        ...this.data.payrollSnapshots.filter((snapshot) => snapshot.runId !== stored.id),
+        ...snapshots.map((snapshot) => ({ ...snapshot, runId: stored.id })),
+      ]
+    }
+    return tick(stored)
+  }
+
+  async deletePayrollRun(companyId: string, id: string): Promise<void> {
+    this.data.payrollRuns = this.data.payrollRuns.filter(
+      (run) => !(run.id === id && run.companyId === companyId),
+    )
+    this.data.payrollSnapshots = this.data.payrollSnapshots.filter(
+      (snapshot) => snapshot.runId !== id,
+    )
+    this.data.payrollPayments = this.data.payrollPayments.filter(
+      (payment) => payment.runId !== id,
+    )
+    return tick(undefined)
+  }
+
+  /**
+   * Post a payroll run.
+   *
+   * The journal is an ordinary journal voucher and is written into the books
+   * the same way one raised by hand would be, so the trial balance and the
+   * payslips agree.
+   */
+  async postPayrollRun(
+    companyId: string,
+    id: string,
+    run: PayrollRun,
+    journal: Voucher,
+    entries: VoucherEntry[],
+  ): Promise<PayrollRun> {
+    const voucher: Voucher = {
+      ...journal,
+      companyId,
+      type: 'journal',
+      status: 'posted',
+      partyId: null,
+      entries,
+      items: [],
+      taxes: [],
+      updatedAt: new Date().toISOString(),
+    }
+    if (!voucher.createdAt) voucher.createdAt = voucher.updatedAt
+
+    const index = this.data.vouchers.findIndex((candidate) => candidate.id === voucher.id)
+    if (index >= 0) this.data.vouchers[index] = voucher
+    else this.data.vouchers = [voucher, ...this.data.vouchers]
+
+    const stored: PayrollRun = {
+      ...run,
+      companyId,
+      id,
+      status: 'posted',
+      journalVoucherId: voucher.id,
+      updatedAt: new Date().toISOString(),
+    }
+    const runIndex = this.data.payrollRuns.findIndex((candidate) => candidate.id === id)
+    if (runIndex >= 0) this.data.payrollRuns[runIndex] = stored
+    else this.data.payrollRuns = [stored, ...this.data.payrollRuns]
+
+    this.recordAudit(
+      companyId,
+      'payroll.posted',
+      'payroll-run',
+      stored.id,
+      `${stored.number} — salary posted`,
+      `Payroll run ${stored.number} for ${stored.period} posted as ${voucher.number}`,
+    )
+
+    return tick(stored)
+  }
+
+  async listPayrollPayments(companyId: string, runId: string): Promise<PayrollPayment[]> {
+    return tick(
+      this.data.payrollPayments.filter(
+        (payment) => payment.companyId === companyId && payment.runId === runId,
+      ),
+    )
+  }
+
+  async savePayrollPayment(payment: PayrollPayment): Promise<PayrollPayment> {
+    const index = this.data.payrollPayments.findIndex((candidate) => candidate.id === payment.id)
+    if (index >= 0) this.data.payrollPayments[index] = payment
+    else this.data.payrollPayments = [...this.data.payrollPayments, payment]
+    return tick(payment)
+  }
+
+  async getPayrollAccounts(companyId: string): Promise<PayrollAccounts | null> {
+    return tick(
+      this.data.payrollAccounts.find((accounts) => accounts.companyId === companyId) ?? null,
+    )
+  }
+
+  async savePayrollAccounts(accounts: PayrollAccounts): Promise<PayrollAccounts> {
+    const index = this.data.payrollAccounts.findIndex(
+      (candidate) => candidate.id === accounts.id,
+    )
+    if (index >= 0) this.data.payrollAccounts[index] = accounts
+    else this.data.payrollAccounts = [...this.data.payrollAccounts, accounts]
+    return tick(accounts)
+  }
+
+  async listStatutoryRules(companyId: string): Promise<StatutoryRuleVersion[]> {
+    return tick(this.data.statutoryRules.filter((rule) => rule.companyId === companyId))
+  }
+
+  async saveStatutoryRule(rule: StatutoryRuleVersion): Promise<StatutoryRuleVersion> {
+    const index = this.data.statutoryRules.findIndex((candidate) => candidate.id === rule.id)
+    if (index >= 0) this.data.statutoryRules[index] = rule
+    else this.data.statutoryRules = [...this.data.statutoryRules, rule]
+    return tick(rule)
+  }
+
+  /**
+   * The next number for a payroll run of a period.
+   *
+   * The number carries the period, so a run is found by the period it pays.
+   */
+  async nextPayrollNumber(companyId: string, period: string): Promise<string> {
+    const base = `PR-${period}`
+    const used = this.data.payrollRuns.filter(
+      (run) => run.companyId === companyId && run.number.startsWith(base),
+    )
+    let highest = 0
+    for (const run of used) {
+      const suffix = run.number.slice(base.length).replace('-', '')
+      const value = Number(suffix)
+      if (Number.isFinite(value)) highest = Math.max(highest, value)
+    }
+    return highest === 0 ? base : `${base}-${String(highest + 1).padStart(2, '0')}`
   }
 }

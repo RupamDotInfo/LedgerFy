@@ -168,9 +168,34 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/payroll/PayrollPayRunsView.vue'),
       },
       {
+        path: 'payroll/pay-runs/:id',
+        name: 'payroll-pay-run',
+        component: () => import('@/views/payroll/PayrollRunDetailView.vue'),
+      },
+      {
+        path: 'payroll/pay-runs/:id/employees/:employeeId',
+        name: 'payroll-pay-run-employee',
+        component: () => import('@/views/payroll/PayrollEmployeeBreakdownView.vue'),
+      },
+      {
         path: 'payroll/payslips',
         name: 'payroll-payslips',
         component: () => import('@/views/payroll/PayrollPayslipsView.vue'),
+      },
+      {
+        path: 'payroll/payslips/:runId/:employeeId',
+        name: 'payroll-payslip',
+        component: () => import('@/views/payroll/PayrollPayslipView.vue'),
+      },
+      {
+        path: 'payroll/reports',
+        name: 'payroll-reports',
+        component: () => import('@/views/payroll/PayrollReportsView.vue'),
+      },
+      {
+        path: 'payroll/settings',
+        name: 'payroll-settings',
+        component: () => import('@/views/payroll/PayrollSettingsView.vue'),
       },
 
       {
