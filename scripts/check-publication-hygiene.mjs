@@ -21,7 +21,7 @@
  * Usage: node scripts/check-publication-hygiene.mjs
  * Exits 0 when everything is in order, 1 with a report when it is not.
  */
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { builtinModules } from 'node:module'
 import path from 'node:path'
